@@ -1,0 +1,132 @@
+"""Account-wide release visits, independent of browser storage and sessions."""
+
+import re
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from pathlib import Path
+
+from app_client import TestClient
+from sqlalchemy import select
+from test_auth import auth_client as auth_fixture
+from test_auth import invite, login, register_member, setup_admin
+
+from app import __version__
+from app.models import AuditEvent, User
+
+auth_client = auth_fixture
+NEXT_VERSION = f"{__version__.split('.')[0]}.{int(__version__.split('.')[1]) + 1}.0"
+
+
+def test_current_releases_link_to_new_tags_and_prior_history_is_unlinked():
+    source = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text()
+    versions = re.findall(
+        r"^## \[([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)\]", source, re.MULTILINE
+    )
+    references = dict(re.findall(r"^\[([^\]]+)\]:\s+(\S+)\s*$", source, re.MULTILINE))
+    # The new repository starts at 0.21.0. Its releases use version tags,
+    # including tags not yet created; deleted history must not acquire dead links.
+    ref = r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?"
+    target = re.compile(
+        rf"https://github\.com/tarobits/taros-label-room/(?:compare/{ref}\.\.\.{ref}|tree/{ref})"
+    )
+    assert versions, "The changelog must contain released versions"
+    assert __version__ in versions
+    assert "0.1.0" in versions and "0.20.4" in versions, "Preserve historical release notes"
+    assert "tarobits/label-server" not in source
+    for version in versions:
+        core = tuple(int(part) for part in version.split("-")[0].split("."))
+        if core >= (0, 21, 0):
+            assert version in references, f"Missing changelog reference for {version}"
+        else:
+            assert version not in references, f"Deleted release {version} must remain unlinked"
+    for name, url in references.items():
+        assert name in versions, f"Unexpected changelog reference {name}"
+        assert target.fullmatch(url), f"Changelog reference {name} must use version tags"
+
+
+def test_visit_requires_session_csrf_and_same_origin(auth_client, tmp_path):
+    client = auth_client
+    assert client.post("/api/auth/changelog").status_code == 401
+    setup_admin(client, tmp_path)
+    csrf = client.headers.pop("X-CSRF-Token")
+    assert client.post("/api/auth/changelog").status_code == 403
+    client.headers["X-CSRF-Token"] = csrf
+    assert (
+        client.post("/api/auth/changelog", headers={"Origin": "https://other.test"}).status_code
+        == 403
+    )
+    first = client.post("/api/auth/changelog")
+    assert first.status_code == 200
+    assert first.json() == {"current_version": __version__, "previous_version": None}
+    assert first.headers["cache-control"] == "private, no-store"
+    assert client.post("/api/auth/changelog").json()["previous_version"] == __version__
+
+
+def test_skipped_versions_are_claimed_once_across_sessions_and_accounts(
+    auth_client, tmp_path, monkeypatch
+):
+    client = auth_client
+    setup_admin(client, tmp_path)
+    client.post("/api/auth/changelog")
+    with client.app.state.factory.begin() as session:
+        user = session.scalar(select(User).where(User.username == "admin"))
+        user.last_seen_version = "0.1.0"
+    monkeypatch.setattr("app.authn.auth_api.__version__", NEXT_VERSION)
+    # Reuse the running application's database without restarting its lifespan.
+    with closing(TestClient(client.app)) as other:
+        login(other)
+        result = other.post("/api/auth/changelog").json()
+        assert result == {"current_version": NEXT_VERSION, "previous_version": "0.1.0"}
+        assert client.post("/api/auth/changelog").json()["previous_version"] == NEXT_VERSION
+    code = invite(client)
+    register_member(client, code)
+    assert client.post("/api/auth/changelog").json()["previous_version"] is None
+    assert client.post("/api/auth/changelog").json()["previous_version"] == NEXT_VERSION
+
+
+def test_automatic_release_checks_do_not_write_audit_events(auth_client, tmp_path, monkeypatch):
+    client = auth_client
+    setup_admin(client, tmp_path)
+    with client.app.state.factory() as session:
+        before = set(session.scalars(select(AuditEvent.id)))
+
+    assert client.post("/api/auth/changelog").json()["previous_version"] is None
+    assert client.post("/api/auth/changelog").json()["previous_version"] == __version__
+    monkeypatch.setattr("app.authn.auth_api.__version__", NEXT_VERSION)
+    assert client.post("/api/auth/changelog").json()["previous_version"] == __version__
+    assert client.post("/api/auth/changelog").json()["previous_version"] == NEXT_VERSION
+
+    with client.app.state.factory() as session:
+        assert set(session.scalars(select(AuditEvent.id))) == before
+        user = session.scalar(select(User).where(User.username == "admin"))
+        assert user.last_seen_version == NEXT_VERSION
+
+
+def test_simultaneous_tabs_claim_history_once_and_downgrades_do_not_rewind(
+    auth_client, tmp_path, monkeypatch
+):
+    client = auth_client
+    setup_admin(client, tmp_path)
+    client.post("/api/auth/changelog")
+    monkeypatch.setattr("app.authn.auth_api.__version__", NEXT_VERSION)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: client.post("/api/auth/changelog").json(), range(8)))
+    assert [result["previous_version"] for result in results].count(__version__) == 1
+    assert [result["previous_version"] for result in results].count(NEXT_VERSION) == 7
+    monkeypatch.setattr("app.authn.auth_api.__version__", "0.2.0")
+    assert client.post("/api/auth/changelog").json()["previous_version"] == NEXT_VERSION
+    monkeypatch.setattr("app.authn.auth_api.__version__", NEXT_VERSION)
+    assert client.post("/api/auth/changelog").json()["previous_version"] == NEXT_VERSION
+
+
+def test_prerelease_visits_advance_to_stable_without_rewinding(auth_client, tmp_path, monkeypatch):
+    client = auth_client
+    setup_admin(client, tmp_path)
+    previous = None
+    for version in ["0.11.0", "0.12.0-pre1", "0.12.0-pre2", "0.12.0"]:
+        monkeypatch.setattr("app.authn.auth_api.__version__", version)
+        assert client.post("/api/auth/changelog").json()["previous_version"] == previous
+        previous = version
+    monkeypatch.setattr("app.authn.auth_api.__version__", "0.12.0-pre1")
+    assert client.post("/api/auth/changelog").json()["previous_version"] == "0.12.0"
+    assert client.post("/api/auth/changelog").json()["previous_version"] == "0.12.0"

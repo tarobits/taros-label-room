@@ -1,0 +1,27 @@
+services:
+  labels:
+    build: .
+    ports:
+      - "${LABEL_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    environment:
+      LABEL_WORKER_INTERVAL_SECONDS: ${LABEL_WORKER_INTERVAL_SECONDS:-2}
+      LABEL_DATABASE_URL: sqlite:////srv/labels/data/labels.db
+      LABEL_PUBLIC_URL: ${LABEL_PUBLIC_URL:-http://localhost:8000}
+      LABEL_TRUST_CLOUDFLARE_HEADERS: ${LABEL_TRUST_CLOUDFLARE_HEADERS:-false}
+      LABEL_CHECK_FOR_UPDATES: ${LABEL_CHECK_FOR_UPDATES:-true}
+      LABEL_GITHUB_TOKEN: ${LABEL_GITHUB_TOKEN:-}
+      LABEL_VAPID_PRIVATE_KEY_FILE: ${LABEL_VAPID_PRIVATE_KEY_FILE:-/srv/labels/data/vapid-private.pem}
+      LABEL_VAPID_SUBJECT: ${LABEL_VAPID_SUBJECT:-}
+    volumes:
+      - label-data:/srv/labels/data
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  label-data:

@@ -1,0 +1,189 @@
+from dataclasses import dataclass
+from threading import Event
+from typing import Literal, Protocol, Sequence, runtime_checkable
+
+from app.printer.messages import reason_descriptor, restore_reason
+
+StopMode = Literal["after_current", "emergency"]
+
+
+class PrintControl:
+    """Thread-safe intent consumed by the hardware owner at safe boundaries."""
+
+    def __init__(self) -> None:
+        self.stop = Event()
+        self.emergency = Event()
+
+    def request(self, mode: StopMode) -> None:
+        if mode == "emergency":
+            self.emergency.set()
+        self.stop.set()
+
+    def clear(self) -> None:
+        self.stop.clear()
+        self.emergency.clear()
+
+    @property
+    def mode(self) -> StopMode | None:
+        return (
+            "emergency"
+            if self.emergency.is_set()
+            else "after_current"
+            if self.stop.is_set()
+            else None
+        )
+
+
+@dataclass(frozen=True)
+class DetectedMedia:
+    """Adapter-owned detection, with an opaque identity for explicit confirmation."""
+
+    width_mm: float | None
+    description: str
+    fingerprint: str
+    problem: str | None = None
+    confirmable: bool = True
+    verification_key: str | None = None
+
+
+@dataclass(frozen=True)
+class MediaSelection:
+    width_mm: float
+    confirmation: str | None = None
+    verified_fingerprint: str | None = None
+    verify_after_change: bool = True
+    verification_required: bool = False
+
+
+@dataclass(frozen=True)
+class PrinterStatus:
+    connected: bool
+    tape_width_mm: float | None
+    error: str | None = None
+    media: DetectedMedia | None = None
+    media_confirmed: bool = False
+    diagnostics: dict[str, str] | None = None
+    media_changed: bool = False
+    # Adapters may distinguish an actionable media check from a hardware fault.
+    # Unknown/older reports remain faults; this never clears an existing block.
+    error_requires_investigation: bool = True
+    error_translation: dict | None = None
+
+    def __post_init__(self) -> None:
+        # Keep the wire text plain: dataclass serialization must not copy a str subclass.
+        descriptor = reason_descriptor(self.error) or self.error_translation
+        object.__setattr__(self, "error_translation", descriptor)
+        if self.error is not None:
+            object.__setattr__(self, "error", str(self.error))
+
+    @property
+    def localized_error(self) -> str | None:
+        return restore_reason(self.error, self.error_translation)
+
+
+@dataclass(frozen=True)
+class LabelGeometry:
+    """Saved physical dimensions for estimating consumption without rasterizing."""
+
+    copy_id: str
+    tape_width_mm: float
+    length_mm: float
+    dpi_x: int = 180
+    dpi_y: int = 180
+    template_padding_mm: float = 0
+
+
+@dataclass(frozen=True)
+class RenderedLabel:
+    """A protocol-independent, packed 1-bit image (MSB first, row padded)."""
+
+    copy_id: str
+    tape_width_mm: float
+    length_mm: float
+    pixel_width: int
+    pixel_height: int
+    raster: bytes
+    dpi_x: int = 180
+    dpi_y: int = 180
+    # A saved canvas may have different dimensions from its physical media.
+    canvas_width_mm: float | None = None
+    template_padding_mm: float = 0
+
+
+@dataclass(frozen=True)
+class PrintResult:
+    consumed_mm: float | None = None
+
+
+class PrintNotStarted(Exception):
+    """Backend guarantees that no tape was consumed and no label was printed."""
+
+
+class PrintInterrupted(Exception):
+    """Only this prefix of the ordered labels is confirmed complete."""
+
+    def __init__(self, message: str, confirmed_labels: int = 0) -> None:
+        super().__init__(message)
+        self.confirmed_labels = confirmed_labels
+
+
+@dataclass(frozen=True)
+class LabelOutputPlan:
+    copy_id: str
+    design_length_mm: float
+    feed_mm: float
+    output_length_mm: float
+    minimum_padding_mm: float
+    trim_required: bool
+    template_padding_mm: float = 0
+
+
+@dataclass(frozen=True)
+class TapeBreakdown:
+    design_mm: float
+    feed_mm: float
+    leader_mm: float
+    unused_mm: float
+
+
+@dataclass(frozen=True)
+class BatchPlan:
+    estimated_mm: float
+    leader_mm: float
+    feed_per_label_mm: float
+    cut_each: bool
+    label_lengths_mm: tuple[float, ...]
+    calibrated: bool = False
+    minimum_cut_length_mm: float | None = None
+    label_output: tuple[LabelOutputPlan, ...] = ()
+    strip_padding_mm: float = 0
+    breakdown: TapeBreakdown | None = None
+
+
+class PrinterBackend(Protocol):
+    def plan_batch(self, labels: Sequence[RenderedLabel | LabelGeometry]) -> BatchPlan: ...
+    def get_status(self) -> PrinterStatus: ...
+    def estimate_consumption(self, labels: Sequence[RenderedLabel | LabelGeometry]) -> float: ...
+    def print_batch(self, labels: Sequence[RenderedLabel]) -> PrintResult: ...
+
+
+@runtime_checkable
+class ControlledPrinterBackend(Protocol):
+    def print_batch_controlled(
+        self, labels: Sequence[RenderedLabel], control: PrintControl
+    ) -> PrintResult: ...
+
+
+@runtime_checkable
+class ConfirmableMediaBackend(PrinterBackend, Protocol):
+    def configure_media(self, selection: MediaSelection | None) -> None: ...
+
+
+@runtime_checkable
+class DurablePrinterBackend(PrinterBackend, Protocol):
+    """Asynchronous execution keyed by a durable attempt, resumable by its owner."""
+
+    def submit_batch(self, batch_id: str, labels: Sequence[RenderedLabel]) -> None: ...
+    def has_batch(self, batch_id: str) -> bool: ...
+    def poll_batch(self, batch_id: str) -> PrintResult | None: ...
+    def request_stop(self, batch_id: str, mode: StopMode) -> None: ...

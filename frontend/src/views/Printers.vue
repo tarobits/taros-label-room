@@ -1,0 +1,710 @@
+<script setup lang="ts">
+import { t } from '../shared/i18n'
+import { freezeLeavingItem } from '../shared/collectionMotion'
+import { vValidateForm } from '../shared/formValidation'
+import { useAuthStore } from '../auth/auth'
+import { computed, reactive, ref } from 'vue'
+import { api } from '../shared/api'
+import { requestPrinting } from '../printing/printing'
+import { useWorkspaceStore, metres } from '../shared/workspace'
+import PropertySection from '../components/PropertySection.vue'
+import AdminDialog from '../components/AdminDialog.vue'
+import ExpandableContent from '../components/ExpandableContent.vue'
+import CartridgeDetection from '../components/CartridgeDetection.vue'
+import { installCartridge } from '../printing/cartridges'
+import { confirmAction } from '../shared/confirmation'
+import type { Destination, Printer } from '../shared/types'
+const w = useWorkspaceStore()
+const auth = useAuthStore()
+const showPrinter = ref(false),
+  showGroup = ref(false),
+  editing = ref('')
+const editingPrinter = ref('')
+const detailsPrinter = ref('')
+const cartridgeChecks = reactive<Record<string, boolean>>({})
+const movingPrinter = ref('')
+const moveTarget = ref('')
+const moveError = ref('')
+const moveChoices = computed(() => w.printers.filter((p) => p.companion?.enabled))
+async function retirePrinter(device: Printer) {
+  if (
+    !(await confirmAction(
+      t('uiDetails.retirePrinter', { value1: String(device.name) }),
+      t('printers.retirePrinter'),
+    ))
+  )
+    return
+  await w.action(() => api(`/printers/${device.id}`, 'DELETE'), t('uiMessages.printerRetired'))
+}
+function openMove(device: Printer) {
+  movingPrinter.value = device.id
+  moveTarget.value = ''
+  moveError.value = ''
+}
+async function movePrinter() {
+  moveError.value = ''
+  if (
+    await w.action(
+      () =>
+        api(`/printers/${movingPrinter.value}/move-to-companion`, 'POST', {
+          target_printer_id: moveTarget.value,
+        }),
+      t('uiMessages.printerMovedCheckItsCartridgeBeforeResumingPrinting'),
+    )
+  )
+    movingPrinter.value = ''
+  else moveError.value = w.actionError
+}
+const detailsDevice = computed(() => w.printers.find((p) => p.id === detailsPrinter.value))
+async function cancelFlush(id: string) {
+  const pending = state(id)?.pending_flush
+  if (pending)
+    await w.action(
+      () => api(`/queue/flush/${pending}`, 'DELETE'),
+      t('uiMessages.pendingFlushCancelledCopiesRemainQueued'),
+    )
+}
+const defaults = () => ({
+  name: '',
+  no_automatic_printing: false,
+  driver: 'brother-pt-p710bt',
+  usb_serial: '',
+  resolution: 'high',
+  feed_mm: 2,
+  leader_mm: 24.5,
+  cut_each: true,
+  timeout_seconds: 120,
+})
+const printer = reactive(defaults())
+const ownPrinter = ref(true)
+function editPrinter(device?: Printer) {
+  ownPrinter.value = true
+  editingPrinter.value = device?.id ?? ''
+  Object.assign(
+    printer,
+    defaults(),
+    device
+      ? {
+          ...device.config,
+          name: device.name,
+          no_automatic_printing: device.no_automatic_printing ?? false,
+          driver: device.driver,
+          usb_serial: device.config.usb_serial ?? '',
+        }
+      : {},
+  )
+  showPrinter.value = true
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+const group = reactive({ name: '', printer_ids: [] as string[] })
+const groups = computed(() => w.destinations.filter((d) => d.kind === 'group'))
+const groupChoices = computed(() => {
+  const existing = w.destinations.find((d) => d.id === editing.value)
+  return [
+    ...new Set([
+      ...w.printers.filter((p) => auth.printer(p.id, 'configure')).map((p) => p.id),
+      ...(existing?.printer_ids ?? []),
+    ]),
+  ].map((id) => ({ id, name: existing?.member_names?.[id] ?? w.destinationName(id) }))
+})
+const state = (id: string) => w.printerStatuses.find((s) => s.printer_id === id)
+const cartridge = (id: string) => w.cartridges.find((c) => c.id === state(id)?.active_cartridge_id)
+function availableCartridges(id: string) {
+  return w.cartridges.filter(
+    (c) =>
+      !c.archived &&
+      (c.id === state(id)?.active_cartridge_id ||
+        (!c.installed && !w.printerStatuses.some((s) => s.active_cartridge_id === c.id))),
+  )
+}
+async function addPrinter() {
+  if (
+    await w.action(
+      () =>
+        api(
+          `/printers${editingPrinter.value ? `/${editingPrinter.value}` : ''}`,
+          editingPrinter.value ? 'PUT' : 'POST',
+          {
+            ...printer,
+            ...(!editingPrinter.value ? { unowned: !ownPrinter.value } : {}),
+            usb_serial: printer.usb_serial.trim() || null,
+          },
+        ),
+      editingPrinter.value
+        ? t('uiMessages.printerConfigurationSaved')
+        : t('uiMessages.printerRegisteredInstallItsCartridgeToMakeMatchingLabelsEligible'),
+    )
+  ) {
+    showPrinter.value = false
+    printer.name = ''
+    printer.usb_serial = ''
+  }
+}
+function editGroup(target?: Destination) {
+  editing.value = target?.id ?? ''
+  group.name = target?.name ?? ''
+  group.printer_ids = [...(target?.printer_ids ?? [])]
+  showGroup.value = true
+}
+async function saveGroup() {
+  if (
+    await w.action(
+      () =>
+        api(
+          `/printer-groups${editing.value ? `/${editing.value}` : ''}`,
+          editing.value ? 'PUT' : 'POST',
+          group,
+        ),
+      t('uiMessages.printerGroupSaved'),
+    )
+  )
+    showGroup.value = false
+}
+async function install(id: string, event: Event) {
+  const select = event.target as HTMLSelectElement
+  const selected = select.value || null
+  select.value = state(id)?.active_cartridge_id ?? ''
+  await w.action(
+    () => installCartridge(id, selected, { explicitSelection: true }),
+    t('uiMessages.installedCartridgeUpdated'),
+  )
+}
+async function hold(id: string, held: boolean) {
+  await w.action(
+    () => api(`/destinations/${id}/automatic-printing`, 'PUT', { held }),
+    held ? t('uiMessages.automaticPrintingHeldMessage') : t('uiMessages.automaticPrintingResumed'),
+  )
+}
+async function setCartridgeCheck(id: string, event: Event) {
+  const checkbox = event.target as HTMLInputElement
+  const enabled = checkbox.checked
+  cartridgeChecks[id] = enabled
+  try {
+    await w.action(
+      () => api(`/printers/${encodeURIComponent(id)}/cartridge-check`, 'PUT', { enabled }),
+      enabled ? t('uiMessages.cartridgeCheckEnabled') : t('uiMessages.cartridgeCheckDisabled'),
+    )
+  } finally {
+    delete cartridgeChecks[id]
+  }
+}
+async function print(id: string) {
+  await w.action(
+    () => requestPrinting(`/destinations/${id}/print`),
+    t('uiMessages.matchingLabelsRequestedOnAvailablePrinters'),
+  )
+}
+async function clearBlock(id: string) {
+  if (
+    !(await confirmAction(
+      t('uiMessages.haveYouInvestigatedThePrinterAndResolvedItsError'),
+      t('uiMessages.clearPrinterBlock'),
+    ))
+  )
+    return
+  await w.action(
+    () => api(`/companions/printers/${encodeURIComponent(id)}/clear`, 'POST'),
+    t('uiMessages.printerBlockCleared'),
+  )
+}
+function move(index: number, offset: number) {
+  const ids = [...group.printer_ids]
+  const [id] = ids.splice(index, 1)
+  ids.splice(index + offset, 0, id!)
+  group.printer_ids = ids
+}
+</script>
+<template>
+  <div class="section-heading">
+    <div class="row wrap">
+      <button v-if="auth.can('printers.manage')" class="secondary" @click="editPrinter()">
+        {{ $t('common.addPrinter') }}</button
+      ><button v-if="auth.can('printers.manage')" class="primary" @click="editGroup()">
+        {{ $t('printers.createGroup') }}
+      </button>
+    </div>
+  </div>
+  <Transition name="panel-expand">
+    <form v-validate-form v-if="showPrinter" class="panel form-stack" @submit.prevent="addPrinter">
+      <h2>{{ editingPrinter ? $t('uiMessages.editPrinter') : $t('common.addPrinter') }}</h2>
+      <label v-if="!editingPrinter" class="checkbox"
+        ><input v-model="ownPrinter" type="checkbox" />{{ $t('printers.ownThisPrinter') }}</label
+      >
+      <div class="field-row">
+        <label
+          >{{ $t('printers.printerName') }}<input v-model="printer.name" required maxlength="100"
+        /></label>
+        <label
+          >{{ $t('printers.driver')
+          }}<select v-model="printer.driver">
+            <option value="brother-pt-p710bt">{{ $t('printers.brotherPtP710btUsb') }}</option>
+          </select></label
+        >
+        <label
+          >{{ $t('common.usbSerialNumber') }}<input v-model="printer.usb_serial" maxlength="128"
+        /></label>
+        <label
+          >{{ $t('printers.defaultPrintResolution')
+          }}<select v-model="printer.resolution">
+            <option value="normal">{{ $t('printers.180180Dpi') }}</option>
+            <option value="high">{{ $t('printers.180360Dpi') }}</option>
+          </select></label
+        >
+      </div>
+      <PropertySection :title="$t('printers.feedCutSettings')">
+        <div class="field-row">
+          <label
+            >{{ $t('common.feedMm')
+            }}<input
+              v-model.number="printer.feed_mm"
+              type="number"
+              min="2"
+              max="127"
+              step="0.1"
+              required
+          /></label>
+          <label
+            >{{ $t('printers.leaderEstimateMm')
+            }}<input
+              v-model.number="printer.leader_mm"
+              type="number"
+              min="0"
+              max="200"
+              step="0.1"
+              required
+          /></label>
+          <label
+            >{{ $t('printers.pageTimeoutSeconds')
+            }}<input
+              v-model.number="printer.timeout_seconds"
+              type="number"
+              min="5"
+              max="600"
+              required
+          /></label>
+        </div>
+        <label class="checkbox"
+          ><input v-model="printer.cut_each" type="checkbox" />{{
+            $t('common.cutEachLabel')
+          }}</label
+        >
+      </PropertySection>
+
+      <label class="checkbox"
+        ><input v-model="printer.no_automatic_printing" type="checkbox" />{{
+          $t('common.noAutomaticPrinting')
+        }}</label
+      >
+      <p class="help">
+        {{ $t('common.usbSerialIsOptionalForOnePrinterMultiplePrinters') }}
+      </p>
+      <div class="row">
+        <button class="primary" :disabled="w.busy">
+          {{
+            editingPrinter ? $t('uiMessages.savePrinter') : $t('uiMessages.registerPrinter')
+          }}</button
+        ><button type="button" class="secondary" @click="showPrinter = false">
+          {{ $t('common.cancel') }}
+        </button>
+      </div>
+    </form>
+  </Transition>
+  <p v-if="!w.printers.length && !showPrinter" class="panel empty">
+    {{
+      auth.can('printers.manage')
+        ? $t('uiMessages.noPrintersRegistered')
+        : $t('uiMessages.noDirectPrinterAccessAvailableGroupsAreListedBelow')
+    }}
+  </p>
+  <TransitionGroup
+    tag="div"
+    class="printer-cards"
+    name="collection"
+    @before-leave="freezeLeavingItem"
+  >
+    <section v-for="device in w.printers" :key="device.id" class="panel form-stack printer-device">
+      <div class="section-heading">
+        <h2>{{ device.name }}</h2>
+        <span v-if="device.no_automatic_printing" class="muted">{{
+          $t('printers.manualOnly')
+        }}</span>
+        <span v-if="device.owner_id === null" class="badge">{{ $t('common.noOwner') }}</span>
+        <span class="badge" :class="state(device.id)?.connected ? 'printed' : 'failed'">{{
+          state(device.id)?.connected ? $t('uiMessages.connected') : $t('uiMessages.disconnected')
+        }}</span>
+      </div>
+      <p v-if="device.configuration_error" class="alert warning">
+        {{ $t('printers.configurationError') }} {{ device.configuration_error
+        }}{{ $t('printers.editThisPrinterToRepairIt') }}
+      </p>
+      <p
+        v-if="
+          state(device.id)?.printer_error &&
+          (!(state(device.id)?.media_warning || state(device.id)?.cartridge_check_pending) ||
+            !auth.printer(device.id, 'configure'))
+        "
+        class="alert warning"
+      >
+        {{ state(device.id)?.printer_error }}
+      </p>
+      <CartridgeDetection :status="state(device.id)" />
+      <p class="muted">{{ $t('printers.brotherPtP710btUsb2') }}</p>
+      <p class="help">
+        {{ device.capabilities?.dpi_y }} × {{ device.capabilities?.dpi_x }}
+        {{ $t('common.dpiDetectedTape') }}
+        {{
+          state(device.id)?.detected_width_mm
+            ? `${state(device.id)?.detected_width_mm} mm`
+            : $t('uiMessages.unknown')
+        }}
+      </p>
+      <button class="text-button" @click="detailsPrinter = device.id">
+        {{ $t('printers.detectedDetails') }}
+      </button>
+      <label v-if="auth.printer(device.id, 'configure')" class="checkbox">
+        <input
+          type="checkbox"
+          :checked="cartridgeChecks[device.id] ?? state(device.id)?.cartridge_check_enabled ?? true"
+          :disabled="
+            w.busy || !!state(device.id)?.printing || !!state(device.id)?.needs_review.length
+          "
+          @change="setCartridgeCheck(device.id, $event)"
+        />
+        {{ $t('printers.confirmCartridgeAfterOpening') }}
+      </label>
+      <label
+        >{{ $t('printers.installedCartridge')
+        }}<select
+          :value="state(device.id)?.active_cartridge_id ?? ''"
+          :disabled="
+            !auth.printer(device.id, 'swap_cartridges') ||
+            w.busy ||
+            !!state(device.id)?.printing ||
+            !!state(device.id)?.needs_review.length ||
+            !!state(device.id)?.pending_flush
+          "
+          @change="install(device.id, $event)"
+        >
+          <option value="">{{ $t('common.noCartridgeInstalled') }}</option>
+          <option v-for="item in availableCartridges(device.id)" :key="item.id" :value="item.id">
+            {{ item.name }} · {{ w.profileName(item.profile_id) }}
+          </option>
+        </select></label
+      >
+      <p v-if="cartridge(device.id)" class="help">
+        {{ w.profileName(cartridge(device.id)!.profile_id) }} · ≈
+        {{ metres(cartridge(device.id)!.remaining_mm) }} {{ $t('common.remaining') }}
+      </p>
+      <p v-if="state(device.id)?.printing">{{ $t('printers.printing') }}</p>
+      <div v-if="state(device.id)?.pending_flush" class="row wrap">
+        <span>{{ $t('printers.aManualFlushIsWaitingFinishOrCancelIt') }}</span>
+        <button
+          v-if="auth.printer(device.id, 'manage_queue')"
+          class="secondary"
+          :disabled="w.busy"
+          @click="cancelFlush(device.id)"
+        >
+          {{ $t('printers.cancelPendingFlush') }}
+        </button>
+      </div>
+      <RouterLink
+        v-for="batch in auth.printer(device.id, 'review')
+          ? (state(device.id)?.needs_review ?? [])
+          : []"
+        :key="batch"
+        class="button secondary"
+        :to="`/batches/${batch}`"
+        >{{ $t('common.reviewInterruptedBatch') }}</RouterLink
+      >
+      <div class="row wrap">
+        <button
+          v-if="state(device.id)?.companion_blocked && auth.printer(device.id, 'review')"
+          class="secondary"
+          :disabled="
+            w.busy || !!state(device.id)?.printing || !!state(device.id)?.needs_review.length
+          "
+          @click="clearBlock(device.id)"
+        >
+          {{ $t('common.clearBlock') }}
+        </button>
+        <button
+          v-if="!device.no_automatic_printing && auth.printer(device.id, 'hold_resume')"
+          class="secondary"
+          :disabled="w.busy"
+          @click="hold(device.id, !state(device.id)?.automatic_printing_held)"
+        >
+          {{
+            state(device.id)?.automatic_printing_held
+              ? $t('uiMessages.resumeAutomaticPrinting')
+              : $t('uiMessages.holdAutomaticPrinting')
+          }}
+        </button>
+        <button
+          v-if="auth.printer(device.id, 'configure')"
+          class="secondary"
+          :disabled="w.busy"
+          @click="editPrinter(device)"
+        >
+          {{ $t('common.configure') }}
+        </button>
+        <button
+          v-if="auth.user?.is_admin && device.connection_kind === 'main'"
+          class="secondary"
+          :disabled="w.busy"
+          @click="openMove(device)"
+        >
+          {{ $t('printers.moveToCompanion') }}
+        </button>
+        <button
+          v-if="auth.printer(device.id, 'configure')"
+          class="danger"
+          :disabled="w.busy"
+          @click="retirePrinter(device)"
+        >
+          {{ $t('printers.retirePrinter') }}
+        </button>
+      </div>
+    </section>
+  </TransitionGroup>
+  <AdminDialog
+    :open="!!movingPrinter"
+    :title="$t('printers.movePrinterToCompanion')"
+    :busy="w.busy"
+    @close="movingPrinter = ''"
+  >
+    <form v-validate-form class="form-stack" @submit.prevent="movePrinter">
+      <ExpandableContent :open="!!moveError"
+        ><p class="alert danger" role="alert">{{ moveError }}</p></ExpandableContent
+      >
+      <label
+        >{{ $t('printers.companionPrinter') }}
+        <select v-model="moveTarget" required>
+          <option disabled value="">{{ $t('common.selectTheNewConnection') }}</option>
+          <option v-for="device in moveChoices" :key="device.id" :value="device.id">
+            {{ device.companion?.name }} · {{ device.name }}
+          </option>
+        </select>
+      </label>
+      <p v-if="!moveChoices.length" role="status">
+        {{ $t('printers.addThePrinterInTheCompanionSWebInterface') }}
+      </p>
+      <p>
+        {{ $t('common.theOriginalPrinterKeepsItsHistoryPermissionsOwnerAnd') }}
+      </p>
+      <p>
+        {{ $t('common.thePrinterInheritsTheCompanionSLocationAndIts') }}
+      </p>
+      <div class="row wrap">
+        <button class="primary" :disabled="w.busy || !moveTarget">
+          {{ $t('printers.movePrinter') }}
+        </button>
+        <button type="button" class="secondary" :disabled="w.busy" @click="movingPrinter = ''">
+          {{ $t('common.cancel') }}
+        </button>
+      </div>
+    </form>
+  </AdminDialog>
+  <AdminDialog
+    :open="!!detailsDevice"
+    :title="
+      $t('uiDetails.detectedDetails', {
+        value1: String(detailsDevice?.name ?? $t('common.printer')),
+      })
+    "
+    @close="detailsPrinter = ''"
+  >
+    <p role="status">
+      {{
+        state(detailsPrinter)?.connected
+          ? $t('uiMessages.connected')
+          : $t('uiMessages.disconnected')
+      }}
+    </p>
+    <p v-if="state(detailsPrinter)?.printer_error" class="alert warning">
+      {{ state(detailsPrinter)?.printer_error }}
+    </p>
+    <dl v-if="state(detailsPrinter)?.diagnostics" class="printer-diagnostics">
+      <template v-for="(value, name) in state(detailsPrinter)?.diagnostics" :key="name">
+        <dt>{{ name }}</dt>
+        <dd>{{ value }}</dd>
+      </template>
+    </dl>
+    <p v-else class="muted">{{ $t('printers.noDetectionDetailsAvailable') }}</p>
+  </AdminDialog>
+  <Transition name="panel-expand">
+    <form v-validate-form v-if="showGroup" class="panel form-stack" @submit.prevent="saveGroup">
+      <h2>{{ editing ? $t('printers.editGroup') : $t('printers.createGroup') }}</h2>
+      <label
+        >{{ $t('common.groupName') }}<input v-model="group.name" required maxlength="100"
+      /></label>
+      <fieldset>
+        <legend>{{ $t('printers.memberPrinters') }}</legend>
+        <label v-for="device in groupChoices" :key="device.id" class="checkbox"
+          ><input v-model="group.printer_ids" type="checkbox" :value="device.id" />{{
+            device.name
+          }}</label
+        >
+      </fieldset>
+      <ol class="preference-list">
+        <li v-for="(id, index) in group.printer_ids" :key="id">
+          <span>{{ groupChoices.find((p) => p.id === id)?.name ?? id }}</span
+          ><button
+            type="button"
+            class="small secondary"
+            :disabled="index === 0"
+            :aria-label="$t('uiDetails.preferEarlier', { value1: String(w.destinationName(id)) })"
+            @click="move(index, -1)"
+          >
+            ↑</button
+          ><button
+            type="button"
+            class="small secondary"
+            :disabled="index === group.printer_ids.length - 1"
+            :aria-label="$t('uiDetails.preferLater', { value1: String(w.destinationName(id)) })"
+            @click="move(index, 1)"
+          >
+            ↓
+          </button>
+        </li>
+      </ol>
+      <p class="help">
+        {{ $t('common.theFirstReadyMemberWithMatchingTapeIsUsed') }}
+      </p>
+      <div class="row">
+        <button class="primary" :disabled="w.busy || !group.printer_ids.length">
+          {{ $t('common.saveGroup') }}</button
+        ><button type="button" class="secondary" @click="showGroup = false">
+          {{ $t('common.cancel') }}
+        </button>
+      </div>
+    </form>
+  </Transition>
+  <section v-if="groups.length" class="panel form-stack">
+    <h2>{{ $t('printers.printerGroups') }}</h2>
+    <article v-for="target in groups" :key="target.id" class="printer-group">
+      <div class="section-heading">
+        <h3>{{ target.name }}</h3>
+        <button
+          v-if="auth.printer(target.id, 'configure')"
+          class="small secondary"
+          @click="editGroup(target)"
+        >
+          {{ $t('printers.editGroup') }}
+        </button>
+      </div>
+      <p>
+        {{
+          target.printer_ids
+            .map((id) => target.member_names?.[id] ?? w.destinationName(id))
+            .join(' → ')
+        }}
+      </p>
+      <p class="help">
+        {{ $t('printers.labelsWaitForAMemberWithTheMatchingTape') }}
+      </p>
+      <div class="row wrap">
+        <RouterLink
+          v-if="auth.printer(target.id, 'view')"
+          class="button primary"
+          :to="`/new?destination=${target.id}`"
+          >{{ $t('printers.printALabel') }}</RouterLink
+        ><RouterLink
+          v-if="auth.printer(target.id, 'view')"
+          class="button secondary"
+          :to="`/runs?destination=${target.id}`"
+          >{{ $t('common.useWithCsv') }}</RouterLink
+        ><button
+          v-if="auth.printer(target.id, 'start_any')"
+          class="secondary"
+          :disabled="w.busy"
+          @click="print(target.id)"
+        >
+          {{ $t('printers.printMatchingQueue') }}</button
+        ><button
+          v-if="!target.no_automatic_printing && auth.printer(target.id, 'hold_resume')"
+          class="secondary"
+          :disabled="w.busy"
+          @click="hold(target.id, !target.automatic_printing_held)"
+        >
+          {{
+            target.automatic_printing_held
+              ? $t('uiMessages.resumeGroup')
+              : $t('uiMessages.holdGroup')
+          }}
+        </button>
+      </div>
+    </article>
+  </section>
+  <section class="panel printer-notifications">
+    <h2>{{ $t('common.notifications') }}</h2>
+    <p>
+      {{
+        w.overview.notifications_enabled
+          ? $t('uiRemainder.ntfyEnabled')
+          : $t('uiRemainder.ntfyDisabled')
+      }}
+    </p>
+    <p class="help">{{ $t('printers.notificationEndpointsAreConfiguredInAdministration') }}</p>
+    <RouterLink v-if="auth.can('inventory.manage')" class="button secondary" to="/profiles">{{
+      $t('printers.manageTapeReminders')
+    }}</RouterLink>
+  </section>
+</template>
+<style scoped>
+.printer-notifications {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+.printer-diagnostics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 12px 20px;
+}
+.printer-diagnostics dt {
+  color: var(--text-secondary);
+}
+.printer-diagnostics dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+@media (max-width: 600px) {
+  .printer-diagnostics {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .printer-diagnostics dd {
+    margin-bottom: 12px;
+  }
+}
+.printer-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
+}
+.printer-cards .panel {
+  margin-bottom: 0;
+}
+.printer-group {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+.printer-group p {
+  margin-bottom: 14px;
+}
+.preference-list {
+  padding-left: 24px;
+}
+.preference-list li {
+  margin: 8px 0;
+}
+.preference-list span {
+  display: inline-block;
+  min-width: 160px;
+}
+.preference-list button {
+  margin-left: 10px;
+}
+</style>

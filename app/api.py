@@ -1,0 +1,1980 @@
+import copy
+import io
+import time
+from dataclasses import asdict
+from typing import Any
+
+from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
+from PIL import Image, ImageOps
+from sqlalchemy import Select, false, func, or_, select
+from sqlalchemy.orm import Session
+
+from app.accounts.cost_estimates import estimate_cost
+from app.accounts.usage_accounts import AdjustmentInput, account_names
+from app.assets.asset_access import require_document_assets
+from app.audit.action_audit import record_action, record_swap
+from app.audit.print_audit import batch_audit, unknown_attribution
+from app.authn.access import Action, Resource, access_context
+from app.authn.authorization import (
+    require_record,
+    template_access,
+    template_scope,
+    visible_destinations,
+    visible_jobs,
+    visible_requests,
+)
+from app.http import (
+    db,
+    get,
+    idle,
+    job_information,
+    job_record,
+    job_summary,
+    job_template_name,
+    record,
+)
+from app.i18n import Message, error_detail, request_language, translate
+from app.maintenance.deletion import document_notices, retain
+from app.models import (
+    Batch,
+    BatchItem,
+    Cartridge,
+    FlushRequest,
+    LabelCopy,
+    LabelTemplate,
+    Notification,
+    NotificationDelivery,
+    NotificationEndpoint,
+    PrinterState,
+    PrintJob,
+    PrintRun,
+    State,
+    TapeProfile,
+    TemplateRevision,
+    User,
+)
+from app.notifications.notification_routing import notifications_enabled
+from app.notifications.notifications import clear_empty_cartridge_alert
+from app.printer.base import ConfirmableMediaBackend, LabelGeometry
+from app.printing.cartridge_confirmation import (
+    check_cartridge,
+    configure_media,
+    lock_media_configuration,
+)
+from app.printing.cartridge_inventory import archive_blockers, deletion_blockers
+from app.printing.copy_counts import copy_count_blocker
+from app.printing.destinations import (
+    automatic_printing_disabled,
+    printer_state,
+    resolve_destination,
+)
+from app.printing.image_jobs import image_document
+from app.printing.preparation import rendering
+from app.printing.print_planning import geometry_plan, planning_backend, queued_plan
+from app.printing.printer_status import status_record
+from app.printing.queue import EMPTY_TAPE_BLOCKER, resolve_batch
+from app.printing.request_models import PrintRequest
+from app.printing.reservations import reserve_flush
+from app.printing.submissions import (
+    build_job,
+    input_fingerprint,
+    rendering_spec,
+    save_submission,
+    submission_destination,
+    submitted_job,
+)
+from app.render import RenderSpec, measure_logic_layout, render_document, render_job
+from app.schemas import (
+    ActiveTapeInput,
+    AutomaticPrintingInput,
+    CartridgeCheckInput,
+    CartridgeInput,
+    CartridgeNameInput,
+    CartridgeNotesInput,
+    CartridgePriceInput,
+    CompletionNotificationInput,
+    CopyCountInput,
+    CopySelectionInput,
+    ImageJobInput,
+    JobInput,
+    ProfileAvailabilityInput,
+    ProfileInput,
+    RemainingInput,
+    ReminderInput,
+    ReviewInput,
+)
+from app.templates.element_geometry import element_geometry
+from app.templates.logic_authoring import reconcile_program, same_program, source_diagnostic
+from app.templates.logic_engine import OPERATIONS, LogicError, validate_program
+from app.templates.logic_schema import Program
+from app.templates.logic_source import compile_source, format_source
+from app.templates.template_dimensions import template_dimensions
+from app.templates.template_logic import (
+    logic_fields,
+    logic_property_values,
+    logic_targets,
+    resolve_logic,
+)
+from app.templates.template_schema import (
+    LogicCompileInput,
+    PreviewInput,
+    RevisionRestoreInput,
+    TemplateDocument,
+    TemplateInput,
+)
+from app.templates.templates import save_revision, template_record
+from app.transaction_routes import TransactionRouter
+
+router = TransactionRouter(prefix="/api")
+
+
+@router.get("/status")
+def status(
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+    printer_id: str | None = None,
+) -> dict[str, Any]:
+    return status_record(request, session, printer_id)
+
+
+@router.get("/tape-profiles")
+def list_profiles(session: Session = Depends(db, scope="function")) -> list[dict[str, Any]]:
+    return [record(p) for p in session.scalars(select(TapeProfile).order_by(TapeProfile.name))]
+
+
+@router.post("/tape-profiles", status_code=201)
+def create_profile(
+    body: ProfileInput, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    profile = TapeProfile(**body.model_dump())
+    session.add(profile)
+    session.flush()
+    return record(profile)
+
+
+@router.put("/tape-profiles/{identifier}")
+def update_profile(
+    identifier: str, body: ProfileInput, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    profile = get(session, TapeProfile, identifier)
+    if any(
+        getattr(profile, key) != getattr(body, key)
+        for key in ("width_mm", "media_family", "label_length_mm")
+    ):
+        if (
+            session.scalar(select(PrintJob.id).where(PrintJob.profile_id == identifier).limit(1))
+            or session.scalar(
+                select(Cartridge.id).where(Cartridge.profile_id == identifier).limit(1)
+            )
+            or session.scalar(select(PrintRun.id).where(PrintRun.profile_id == identifier).limit(1))
+        ):
+            raise HTTPException(
+                409,
+                Message("serverMessages.createANewProfileToChangeTheWidthOrMediaOfAUsedProfile"),
+            )
+    for key, value in body.model_dump().items():
+        setattr(profile, key, value)
+    session.flush()
+    return record(profile)
+
+
+@router.put("/tape-profiles/{identifier}/availability")
+def set_profile_availability(
+    identifier: str,
+    body: ProfileAvailabilityInput,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    profile = get(session, TapeProfile, identifier)
+    if profile.available != body.available:
+        profile.available = body.available
+        record_action(
+            session,
+            "profile.availability_changed",
+            "global",
+            "",
+            {"profile_id": profile.id, "available": body.available},
+        )
+    session.flush()
+    return record(profile)
+
+
+@router.delete("/tape-profiles/{identifier}")
+def delete_profile(
+    identifier: str, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    profile = get(session, TapeProfile, identifier)
+    from app.printing.request_models import PrintRequest
+
+    if any(
+        label["profile_id"] == identifier
+        for pending in session.scalars(select(PrintRequest))
+        for label in pending.labels
+    ):
+        raise HTTPException(409, Message("serverMessages.profileIsUsedByASavedPrintRequest"))
+    for query in [
+        select(Cartridge.id).where(Cartridge.profile_id == identifier),
+        select(PrintJob.id).where(PrintJob.profile_id == identifier),
+        select(Notification.id).where(Notification.profile_id == identifier),
+        select(PrintRun.id).where(PrintRun.profile_id == identifier),
+    ]:
+        if session.scalar(query.limit(1)):
+            raise HTTPException(
+                409, Message("serverMessages.profileHasHistoryOrCartridgesAndCannotBeDeleted")
+            )
+    session.delete(profile)
+    return {"deleted": True}
+
+
+@router.put("/tape-profiles/{identifier}/reminder")
+def control_reminder(
+    identifier: str, body: ReminderInput, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    profile = get(session, TapeProfile, identifier)
+    if body.action == "snooze" and (body.until or 0) <= time.time():
+        raise HTTPException(422, Message("serverMessages.snoozeMustEndInTheFuture"))
+    profile.reminder_silenced = body.action == "silence"
+    profile.reminder_snoozed_until = body.until if body.action == "snooze" else None
+    if body.action == "resume":
+        profile.reminder_last_at = None
+    session.flush()
+    return record(profile)
+
+
+@router.get("/cartridges")
+def list_cartridges(
+    request: Request,
+    include_archived: bool = False,
+    session: Session = Depends(db, scope="function"),
+) -> list[dict[str, Any]]:
+    # Inventory is shared, but physical printer identities may be restricted.
+    installed = {
+        state.active_cartridge_id: state.printer_id
+        for state in session.scalars(select(PrinterState))
+        if state.active_cartridge_id
+    }
+    busy_printers = set(
+        session.scalars(
+            select(Batch.printer_id).where(Batch.state.in_([State.PRINTING, State.NEEDS_REVIEW]))
+        )
+    )
+    archive_reasons = archive_blockers(session)
+    delete_reasons = deletion_blockers(session, archive_reasons)
+    query = select(Cartridge)
+    if not include_archived:
+        query = query.where(Cartridge.archived.is_(False))
+    return [
+        {
+            **record(cartridge),
+            "installed": cartridge.id in installed,
+            "estimate_locked": installed.get(cartridge.id) in busy_printers,
+            "archive_blocked_reason": archive_reasons.get(cartridge.id),
+            "delete_blocked_reason": delete_reasons.get(cartridge.id),
+        }
+        for cartridge in session.scalars(query)
+        if access_context(request).can_cartridge(cartridge.id, "view")
+    ]
+
+
+@router.post("/cartridges", status_code=201)
+def create_cartridge(
+    body: CartridgeInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    get(session, TapeProfile, body.profile_id)
+    values = body.model_dump()
+    values["remaining_mm"] = (
+        body.nominal_length_mm if body.remaining_mm is None else body.remaining_mm
+    )
+    cartridge = Cartridge(**values, owner_id=access_context(request).actor.id)
+    session.add(cartridge)
+    session.flush()
+    from app.authn.ownership import record_ownership
+
+    record_ownership(session, "cartridge", cartridge)
+    record_action(
+        session,
+        "cartridge.created",
+        "cartridge",
+        cartridge.id,
+        {
+            "name": cartridge.name,
+            "owner_id": cartridge.owner_id,
+            "profile_id": cartridge.profile_id,
+            "nominal_length_mm": cartridge.nominal_length_mm,
+            "remaining_mm": cartridge.remaining_mm,
+        },
+    )
+    return record(cartridge)
+
+
+@router.delete("/cartridges/{identifier}")
+def archive_cartridge(
+    identifier: str, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    cartridge = get(session, Cartridge, identifier)
+    if reason := archive_blockers(session).get(identifier):
+        raise HTTPException(409, reason)
+    cartridge.archived = True
+    record_action(session, "cartridge.archived", "cartridge", cartridge.id)
+    session.flush()
+    return record(cartridge)
+
+
+@router.put("/cartridges/{identifier}")
+def rename_cartridge(
+    identifier: str,
+    body: CartridgeNameInput,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    cartridge = get(session, Cartridge, identifier)
+    previous = cartridge.name
+    cartridge.name = body.name
+    record_action(
+        session,
+        "cartridge.renamed",
+        "cartridge",
+        cartridge.id,
+        {"old_name": previous, "new_name": cartridge.name},
+    )
+    session.flush()
+    return record(cartridge)
+
+
+@router.post("/cartridges/{identifier}/restore")
+def restore_cartridge(
+    identifier: str, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    cartridge = get(session, Cartridge, identifier)
+    cartridge.archived = False
+    record_action(session, "cartridge.restored", "cartridge", cartridge.id)
+    session.flush()
+    return record(cartridge)
+
+
+@router.put("/cartridges/{identifier}/notes")
+def edit_cartridge_notes(
+    identifier: str, body: CartridgeNotesInput, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    cartridge = get(session, Cartridge, identifier)
+    cartridge.notes = body.notes
+    record_action(session, "cartridge.notes_changed", "cartridge", cartridge.id)
+    session.flush()
+    return record(cartridge)
+
+
+@router.delete("/cartridges/{identifier}/permanent")
+def delete_cartridge(
+    identifier: str, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    cartridge = get(session, Cartridge, identifier)
+    if reason := deletion_blockers(session, archive_blockers(session)).get(identifier):
+        raise HTTPException(409, reason)
+    record_action(session, "cartridge.deleted", "cartridge", cartridge.id, {"name": cartridge.name})
+    session.delete(cartridge)
+    return {"deleted": True}
+
+
+@router.get("/usage")
+def tape_usage(
+    request: Request,
+    all_users: bool = False,
+    user_id: str | None = None,
+    cartridge_id: str | None = Query(default=None, min_length=1, max_length=100),
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    from app.accounts.usage import usage_report
+
+    context = access_context(request)
+    if (all_users or user_id not in (None, context.actor.id)) and not context.has_permission(
+        "usage.view_others"
+    ):
+        raise HTTPException(403, Message("serverMessages.viewingOtherUsersUsageIsNotPermitted"))
+    if all_users and user_id is not None:
+        raise HTTPException(422, Message("serverMessages.chooseAllUsersOrAnIndividualUser"))
+    if user_id is not None and user_id not in account_names(session, user_id):
+        raise HTTPException(404, Message("serverMessages.usageAccountNotFound"))
+    return usage_report(session, None if all_users else user_id or context.actor.id, cartridge_id)
+
+
+@router.get("/usage/users")
+def usage_users(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> list[dict[str, str]]:
+    context = access_context(request)
+    if not any(context.has_permission(key) for key in ("usage.view_others", "usage.edit_accounts")):
+        raise HTTPException(403, Message("serverMessages.usageAccountAccessIsNotPermitted"))
+    return [
+        {"user_id": identifier, "username": name}
+        for identifier, name in sorted(
+            account_names(session).items(), key=lambda item: (item[1].casefold(), item[0])
+        )
+    ]
+
+
+@router.post("/usage/adjustments", status_code=201)
+def usage_adjustment(
+    body: AdjustmentInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    context = access_context(request)
+    if not context.has_permission("usage.edit_accounts"):
+        raise HTTPException(403, Message("serverMessages.editingUsageAccountsIsNotPermitted"))
+    from app.accounts.accounting_api import record_repayment
+
+    return record(record_repayment(request, session, body))
+
+
+@router.put("/cartridges/{identifier}/price")
+def cartridge_price(
+    identifier: str,
+    body: CartridgePriceInput,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    for state in session.scalars(
+        select(PrinterState).where(PrinterState.active_cartridge_id == identifier)
+    ):
+        idle(session, state.printer_id)
+    cartridge = get(session, Cartridge, identifier)
+    if cartridge.archived:
+        raise HTTPException(
+            409, Message("serverMessages.restoreThisCartridgeBeforeChangingItsPrice")
+        )
+    old_price, old_currency = cartridge.price_minor, cartridge.currency
+    cartridge.price_minor, cartridge.currency = body.price_minor, body.currency
+    record_action(
+        session,
+        "cartridge.price_changed",
+        "cartridge",
+        cartridge.id,
+        {
+            "old_price_minor": old_price,
+            "new_price_minor": body.price_minor,
+            "old_currency": old_currency,
+            "currency": body.currency,
+        },
+    )
+    session.flush()
+    return record(cartridge)
+
+
+@router.put("/cartridges/{identifier}/remaining")
+def correct_remaining(
+    identifier: str, body: RemainingInput, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    installed_states = list(
+        session.scalars(select(PrinterState).where(PrinterState.active_cartridge_id == identifier))
+    )
+    for state in installed_states:
+        idle(session, state.printer_id)
+    cartridge = get(session, Cartridge, identifier)
+    if cartridge.archived:
+        raise HTTPException(
+            409, Message("serverMessages.restoreThisCartridgeBeforeCorrectingItsRemainingTape")
+        )
+    if body.remaining_mm > cartridge.nominal_length_mm:
+        raise HTTPException(422, Message("serverMessages.remainingLengthExceedsNominalLength"))
+    previous = cartridge.remaining_mm
+    cartridge.remaining_mm = body.remaining_mm
+    record_action(
+        session,
+        "cartridge.remaining_corrected",
+        "cartridge",
+        cartridge.id,
+        {"old_remaining_mm": previous, "new_remaining_mm": body.remaining_mm},
+    )
+    cartridge.consumption_uncertain = False
+    if body.remaining_mm > 0:
+        for state in installed_states:
+            clear_empty_cartridge_alert(session, state)
+            if state.blocker == EMPTY_TAPE_BLOCKER:
+                state.blocker = None
+                state.blocker_translation = None
+    session.flush()
+    return record(cartridge)
+
+
+@router.put("/printer/active-tape", response_model=None)
+def active_tape(
+    body: ActiveTapeInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+    printer_id: str | None = None,
+) -> dict[str, Any] | Response:
+    printer_id = resolve_destination(session, printer_id)
+    access_context(request).require_printer(printer_id, "swap_cartridges")
+    idle(session, printer_id)
+    state = printer_state(session, printer_id)
+    if state.active_cartridge_id != body.cartridge_id and session.scalar(
+        select(FlushRequest.id)
+        .where(
+            FlushRequest.completed.is_(False),
+            (FlushRequest.printer_id == printer_id)
+            | (FlushRequest.cartridge_id == body.cartridge_id),
+        )
+        .limit(1)
+    ):
+        raise HTTPException(
+            409, Message("serverMessages.cancelOrFinishThePendingFlushBeforeChangingCartridges")
+        )
+    cartridge = None
+    if body.cartridge_id:
+        cartridge = get(session, Cartridge, body.cartridge_id)
+        from app.media import require_profile_supported
+
+        try:
+            require_profile_supported(
+                get(session, TapeProfile, cartridge.profile_id),
+                request.app.state.registry.definition(printer_id).capabilities,
+            )
+        except ValueError as error:
+            raise HTTPException(422, error_detail(error)) from error
+        if cartridge.archived:
+            raise HTTPException(
+                409, Message("serverMessages.restoreThisCartridgeBeforeInstallingIt")
+            )
+        if session.scalar(
+            select(PrinterState.id).where(
+                PrinterState.active_cartridge_id == body.cartridge_id,
+                PrinterState.printer_id != printer_id,
+            )
+        ):
+            raise HTTPException(
+                409, Message("serverMessages.cartridgeIsAlreadyInstalledInAnotherPrinter")
+            )
+    confirmation, verification = (
+        check_cartridge(
+            request,
+            session,
+            state,
+            cartridge,
+            body.media_confirmation,
+            body.confirm_matching_cartridge,
+        )
+        if cartridge
+        else (None, None)
+    )
+    if cartridge is not None:
+        from app.printing.cartridge_location import installation_location
+
+        location_preview = installation_location(
+            session, request, printer_id, cartridge, body.move_location, body.location_confirmation
+        )
+        if location_preview:
+            return JSONResponse(status_code=409, content={"detail": location_preview})
+    if state.active_cartridge_id != body.cartridge_id:
+        clear_empty_cartridge_alert(session, state)
+    previous = state.active_cartridge_id
+    state.active_cartridge_id = body.cartridge_id
+    state.media_confirmation = confirmation
+    state.media_verified_fingerprint = verification
+    if verification or cartridge is None:
+        state.cartridge_check_pending = False
+    elif worker := request.app.state.fleet.workers.get(printer_id):
+        state.cartridge_check_pending = (
+            state.cartridge_check_pending or worker.latest_status.media_changed
+        ) and state.cartridge_check_enabled
+    state.blocker = None
+    state.blocker_translation = None
+    record_swap(
+        session, printer_id, previous, body.cartridge_id, bool(verification or confirmation)
+    )
+    session.flush()
+    worker = request.app.state.fleet.workers.get(printer_id)
+    if worker and isinstance(worker.backend, ConfirmableMediaBackend):
+        # Apply only after the selection and its confirmation have committed.
+        def apply_selection() -> None:
+            with request.app.state.factory() as lookup:
+                configure_media(worker.backend, lookup, printer_state(lookup, printer_id))
+            worker.latest_status = worker.backend.get_status()
+
+        if cartridge is None:
+            lock_media_configuration(request, worker)
+        request.state.after_commit.append(apply_selection)
+    return record(state)
+
+
+@router.put("/printers/{identifier}/cartridge-check")
+def cartridge_check(
+    identifier: str,
+    body: CartridgeCheckInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    from app.models import PrinterDevice
+
+    access_context(request).require_printer(identifier, "configure")
+    get(session, PrinterDevice, identifier)
+    idle(session, identifier)
+    state = printer_state(session, identifier)
+    worker = request.app.state.fleet.workers.get(identifier)
+    if worker:
+        lock_media_configuration(request, worker)
+    previous = state.cartridge_check_enabled
+    state.cartridge_check_enabled = body.enabled
+    record_action(
+        session,
+        "printer.cartridge_check_changed",
+        "printer",
+        identifier,
+        {"old_enabled": previous, "new_enabled": body.enabled},
+    )
+    if not body.enabled:
+        state.cartridge_check_pending = False
+        state.blocker = None
+        state.blocker_translation = None
+    session.flush()
+    if worker:
+
+        def apply_setting() -> None:
+            with request.app.state.factory() as lookup:
+                configure_media(worker.backend, lookup, printer_state(lookup, identifier))
+            worker.latest_status = worker.backend.get_status()
+
+        request.state.after_commit.append(apply_setting)
+    return record(state)
+
+
+@router.get("/printers")
+def printers(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> list[dict[str, Any]]:
+    from app.models import Companion, CompanionPrinter, PrinterDevice
+
+    result = []
+    definitions = {item.id: item for item in request.app.state.registry.definitions()}
+    for device in session.scalars(select(PrinterDevice)):
+        if device.config.get("retired") or not access_context(request).can_printer(
+            device.id, "view"
+        ):
+            continue
+        definition = definitions.get(device.id)
+        link = session.get(CompanionPrinter, device.id)
+        station = session.get(Companion, link.companion_id) if link else None
+        result.append(
+            {
+                **(
+                    asdict(definition)
+                    if definition
+                    else {
+                        "id": device.id,
+                        "name": device.name,
+                        "driver": device.driver,
+                        "capabilities": None,
+                        "connection": None,
+                    }
+                ),
+                "config": device.config
+                if access_context(request).can_printer(device.id, "configure")
+                else {},
+                "connection_kind": "companion" if link else "main",
+                "no_automatic_printing": device.no_automatic_printing,
+                "companion": {
+                    "name": station.name,
+                    "enabled": bool(link and link.enabled and station.key_hash),
+                }
+                if station and access_context(request).actor.is_admin
+                else None,
+                "configuration_error": request.app.state.fleet.configuration_errors.get(device.id),
+                "owner_id": device.owner_id,
+                "location_id": device.location_id,
+            }
+        )
+    return result
+
+
+@router.get("/workspace")
+def workspace_info(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    return {
+        "notifications_enabled": notifications_enabled(session),
+        "pending_requests": session.scalar(
+            visible_requests(
+                request, session, select(func.count()).select_from(PrintRequest)
+            ).where(PrintRequest.status == "pending")
+        ),
+        "total_queued": session.scalar(
+            visible_jobs(
+                request, session, select(func.count()).select_from(LabelCopy).join(PrintJob)
+            ).where(LabelCopy.state == State.QUEUED)
+        ),
+    }
+
+
+@router.get("/user-groups")
+def user_groups(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> list[dict[str, Any]]:
+    from app.models import UserGroup
+
+    actor = access_context(request).actor
+    return [
+        {
+            "id": group.id,
+            "name": group.name,
+            **asdict(actor.group_memberships[group.id]),
+        }
+        for group in session.scalars(select(UserGroup).order_by(UserGroup.name))
+        if actor.is_admin or group.id in actor.group_ids
+    ]
+
+
+@router.put("/printer/automatic-printing")
+def automatic_printing(
+    body: AutomaticPrintingInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+    printer_id: str | None = None,
+) -> dict[str, Any]:
+    printer_id = resolve_destination(session, printer_id)
+    access_context(request).require_printer(printer_id, "hold_resume")
+    if automatic_printing_disabled(session, printer_id):
+        raise HTTPException(
+            409, Message("serverMessages.automaticPrintingIsDisabledInPrinterSettings")
+        )
+    state = printer_state(session, printer_id)
+    previous = state.automatic_printing_held
+    state.automatic_printing_held = body.held
+    record_action(
+        session,
+        "printer.hold_changed",
+        "printer",
+        printer_id,
+        {"old_held": previous, "new_held": body.held},
+    )
+    session.flush()
+    return record(state)
+
+
+@router.get("/templates")
+def templates(
+    request: Request, session: Session = Depends(db, scope="function"), archived: bool = False
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **template_record(t, session, request.app.state.fonts),
+            "asset_notices": document_notices(session, t.document),
+            "can_edit": template_access(request, t, Action.WRITE),
+            "can_delete": template_access(request, t, Action.DELETE),
+        }
+        for t in session.scalars(
+            select(LabelTemplate)
+            .where(LabelTemplate.archived.is_(archived))
+            .order_by(LabelTemplate.name)
+        )
+        if template_access(request, t)
+    ]
+
+
+@router.get("/templates/{identifier}")
+def template(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    value = get(session, LabelTemplate, identifier)
+    return {
+        **template_record(value, session, request.app.state.fonts),
+        "asset_notices": document_notices(session, value.document),
+        "can_edit": template_access(request, value, Action.WRITE),
+        "can_delete": template_access(request, value, Action.DELETE),
+    }
+
+
+@router.get("/templates/{identifier}/preview.webp")
+def template_thumbnail(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> Response:
+    # Serialize with deletion so a cached thumbnail cannot bypass removed dependencies.
+    with request.app.state.fleet.lock:
+        value = get(session, LabelTemplate, identifier)
+        require_document_assets(request, session, value.document, allow_missing=True)
+        notices = document_notices(session, value.document)
+        try:
+            content = request.app.state.template_previews.get(
+                value, notices, request.app.state.fonts, request.app.state.images
+            )
+        except (ValueError, OSError) as error:
+            raise HTTPException(
+                422, Message("serverMessages.templatePreviewIsUnavailable")
+            ) from error
+    return Response(content, media_type="image/webp")
+
+
+def validate_layout(
+    document: TemplateDocument, request: Request, destination_id: str | None = None
+) -> None:
+    try:
+        render_document(
+            document,
+            {},
+            rendering_spec(request, document, destination_id),
+            samples=True,
+            fonts=request.app.state.fonts,
+            images=request.app.state.images,
+        )
+    except ValueError as error:
+        raise HTTPException(422, error_detail(error)) from error
+
+
+@router.post("/templates", status_code=201)
+def create_template(
+    body: TemplateInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    template_scope(request, session, body.scope, body.group_id)
+    with rendering(
+        request, session, body.document.model_dump(), destination_id=body.destination_id
+    ):
+        validate_layout(body.document, request, body.destination_id)
+    value = LabelTemplate(
+        name=body.name,
+        document=body.document.model_dump(),
+        owner_id=access_context(request).actor.id,
+        scope=body.scope,
+        group_id=body.group_id,
+    )
+    session.add(value)
+    session.flush()
+    save_revision(session, value, access_context(request).actor)
+    return template_record(value, session, request.app.state.fonts)
+
+
+@router.put("/templates/{identifier}")
+def update_template(
+    identifier: str,
+    body: TemplateInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    value = get(session, LabelTemplate, identifier)
+    require_record(request, value, Action.WRITE)
+    if (value.scope, value.group_id) != (body.scope, body.group_id):
+        template_scope(request, session, body.scope, body.group_id)
+        if (
+            not access_context(request).actor.is_admin
+            and value.owner_id != access_context(request).actor.id
+        ):
+            raise HTTPException(
+                403, Message("serverMessages.onlyTheOwnerOrAnAdministratorCanChangeSharing")
+            )
+    if value.archived or body.expected_revision != value.revision:
+        raise HTTPException(
+            409, Message("serverMessages.templateChangedOrWasArchivedReloadBeforeSaving")
+        )
+    with rendering(
+        request, session, body.document.model_dump(), destination_id=body.destination_id
+    ):
+        validate_layout(body.document, request, body.destination_id)
+    value.name, value.document = body.name, body.document.model_dump()
+    value.scope, value.group_id = body.scope, body.group_id
+    value.revision += 1
+    request.state.after_commit.append(
+        lambda identifier=value.id: request.app.state.template_previews.invalidate(identifier)
+    )
+    save_revision(session, value, access_context(request).actor)
+    session.flush()
+    return template_record(value, session, request.app.state.fonts)
+
+
+@router.delete("/templates/{identifier}")
+def archive_template(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    value = get(session, LabelTemplate, identifier)
+    require_record(request, value, Action.DELETE)
+    value.archived = True
+    return {"archived": True}
+
+
+@router.post("/templates/{identifier}/unarchive")
+def unarchive_template(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    value = get(session, LabelTemplate, identifier)
+    require_record(request, value, Action.DELETE)
+    value.archived = False
+    return {"archived": False}
+
+
+@router.delete("/templates/{identifier}/permanent")
+def delete_template(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    value = get(session, LabelTemplate, identifier)
+    context = access_context(request)
+    actor = context.actor
+    if not actor.is_admin and not (
+        value.scope == "global" and context.has_permission("templates.delete_global")
+    ):
+        raise HTTPException(403, Message("serverMessages.youCannotDeleteThisTemplate"))
+    require_record(request, value, Action.DELETE)
+    retain(session, "templates", identifier, value.name, value.owner_id, actor.id)
+    from app.printing.job_access import reconcile_access_holds
+
+    reconcile_access_holds(session)
+    return {"deleted": True}
+
+
+@router.get("/templates/{identifier}/revisions")
+def revisions(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> list[dict[str, Any]]:
+    get(session, LabelTemplate, identifier)
+    return [
+        {
+            **record(item),
+            **template_dimensions(
+                TemplateDocument.model_validate(item.document), request.app.state.fonts
+            ),
+        }
+        for item in session.scalars(
+            select(TemplateRevision)
+            .where(TemplateRevision.template_id == identifier)
+            .order_by(TemplateRevision.revision.desc())
+        )
+    ]
+
+
+def get_template_revision(session: Session, identifier: str, number: int) -> TemplateRevision:
+    item = session.get(TemplateRevision, (identifier, number))
+    if item is None:
+        raise HTTPException(404, Message("serverMessages.templateRevisionNotFound"))
+    return item
+
+
+@router.get("/templates/{identifier}/revisions/{number}/preview")
+def revision_preview(
+    identifier: str,
+    number: int,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    get(session, LabelTemplate, identifier)
+    item = get_template_revision(session, identifier, number)
+    try:
+        document = TemplateDocument.model_validate(item.document)
+        output = render_document(
+            document,
+            {},
+            RenderSpec(stretch_canvas=True),
+            samples=True,
+            fonts=request.app.state.fonts,
+            images=request.app.state.images,
+            allow_missing_assets=True,
+        )
+    except (ValueError, OSError) as error:
+        raise HTTPException(
+            422, Message("serverMessages.thisRevisionCouldNotBePreviewed")
+        ) from error
+    tape = document.preview_tape
+    return {
+        "png": output.preview(
+            tape.foreground if tape else "#000000", tape.background if tape else "#ffffff"
+        ),
+        "width_mm": output.document.width_mm,
+        "length_mm": output.document.length_mm,
+        "warnings": output.warnings,
+        "missing_assets": output.missing_assets,
+    }
+
+
+@router.post("/templates/{identifier}/revisions/{number}/restore")
+def restore_revision(
+    identifier: str,
+    number: int,
+    body: RevisionRestoreInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    value = get(session, LabelTemplate, identifier)
+    require_record(request, value, Action.WRITE)
+    if value.archived or body.expected_revision != value.revision:
+        raise HTTPException(
+            409, Message("serverMessages.templateChangedOrWasArchivedReloadHistoryBeforeRestoring")
+        )
+    if number == value.revision:
+        raise HTTPException(409, Message("serverMessages.thisRevisionIsAlreadyCurrent"))
+    source = get_template_revision(session, identifier, number)
+    try:
+        document = TemplateDocument.model_validate(source.document)
+    except ValueError as error:
+        raise HTTPException(
+            422, Message("serverMessages.thisSavedRevisionIsNoLongerAValidTemplate")
+        ) from error
+    with rendering(request, session, document.model_dump(), destination_id=body.destination_id):
+        try:
+            render_document(
+                document,
+                {},
+                RenderSpec(stretch_canvas=True),
+                samples=True,
+                fonts=request.app.state.fonts,
+                images=request.app.state.images,
+            )
+        except (ValueError, OSError) as error:
+            raise HTTPException(
+                422, Message("serverMessages.thisRevisionCouldNotBeRestored")
+            ) from error
+    value.name = source.name
+    value.document = copy.deepcopy(source.document)
+    value.revision += 1
+    save_revision(session, value, access_context(request).actor, restored_from=number)
+    request.state.after_commit.append(
+        lambda identifier=value.id: request.app.state.template_previews.invalidate(identifier)
+    )
+    session.flush()
+    return template_record(value, session, request.app.state.fonts)
+
+
+@router.post("/logic/inspect")
+def inspect_logic(
+    body: TemplateDocument,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+    destination_id: str | None = None,
+) -> dict[str, Any]:
+    require_document_assets(request, session, body.model_dump(mode="json"))
+    fields, targets = logic_fields(body), logic_targets(body)
+    program = body.logic or Program()
+    types = validate_program(program, fields, targets)
+    source = format_source(program, fields, targets)
+    if body.logic_editor and body.logic_editor.source is not None:
+        saved_source = body.logic_editor.source
+        try:
+            if same_program(compile_source(saved_source, fields, targets), program):
+                source = saved_source
+        except ValueError:
+            pass  # Editor metadata cannot replace executable logic.
+    values = {}
+    property_values = logic_property_values(body)
+    sample_error = None
+    try:
+        spec = rendering_spec(request, body, destination_id)
+        measured = measure_logic_layout(body, {}, spec, samples=True, fonts=request.app.state.fonts)
+        _, evaluation = resolve_logic(body, {}, samples=True, measured=measured)
+        values = {**evaluation.inputs, **evaluation.variables}
+        # Keep sizing switches from the authored template, alongside measured
+        # geometry and logic results (the printable document freezes switches).
+        property_values["label"]["length_mm"] = measured.length_mm
+        for element in measured.elements:
+            property_values[element.id].update(element_geometry(element))
+        for target_id, properties in evaluation.properties.items():
+            property_values[target_id].update(properties)
+    except ValueError as error:
+        sample_error = translate(error_detail(error), request_language(request))
+    return {
+        "operations": translate(
+            [asdict(operation) for operation in OPERATIONS.values()], request_language(request)
+        ),
+        "targets": {
+            name: {
+                **target.model_dump(),
+                "disabled_properties": translate(
+                    target.disabled_properties, request_language(request)
+                ),
+            }
+            for name, target in targets.items()
+        },
+        "types": types,
+        "values": values,
+        "property_values": property_values,
+        "sample_error": sample_error,
+        "source": source,
+    }
+
+
+@router.post("/logic/compile")
+def compile_logic(
+    body: LogicCompileInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+    destination_id: str | None = None,
+) -> dict[str, Any]:
+    document = body.document
+    require_document_assets(request, session, document.model_dump(mode="json"))
+    fields, targets = logic_fields(document), logic_targets(document)
+    try:
+        program = compile_source(body.source, fields, targets)
+        if document.auto_length:
+            for binding in program.bindings:
+                if binding.target == "label":
+                    raise LogicError(
+                        "Disable automatic label length before binding label.length_mm",
+                        binding.expression,
+                    )
+        program = reconcile_program(document.logic or Program(), program)
+        candidate = document.model_dump(mode="json")
+        candidate.update(logic=program.model_dump(mode="json"), logic_editor=None)
+        resolved = TemplateDocument.model_validate(candidate)
+    except ValueError as error:
+        issue = (
+            error
+            if isinstance(error, LogicError)
+            else LogicError(
+                Message(
+                    "logicErrors.theSourceIsIncompatibleWithThisTemplateCheckVariablesUsedInElementText"
+                )
+            )
+        )
+        return {
+            "valid": False,
+            "diagnostics": [source_diagnostic(issue, body.source, request_language(request))],
+        }
+    require_document_assets(request, session, resolved.model_dump(mode="json"))
+    return {
+        "valid": True,
+        "program": program.model_dump(mode="json"),
+        "formatted": format_source(program, fields, targets),
+        "catalog": inspect_logic(resolved, request, session, destination_id=destination_id),
+        "diagnostics": [],
+    }
+
+
+@router.post("/preview")
+def preview(
+    body: PreviewInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    return preview_record(body, request, session)
+
+
+def preview_record(body: PreviewInput, request: Request, session: Session) -> dict[str, Any]:
+    document = body.document or TemplateDocument.model_validate(
+        get(session, LabelTemplate, body.template_id or "").document
+    )
+    require_document_assets(request, session, document.model_dump(), allow_missing=True)
+    require_document_assets(request, session, body.model_dump(mode="json")["data"])
+    foreground = body.foreground or (
+        document.preview_tape.foreground if document.preview_tape else "#000000"
+    )
+    background = body.background or (
+        document.preview_tape.background if document.preview_tape else "#ffffff"
+    )
+    try:
+        spec = rendering_spec(request, document, body.destination_id)
+        output = render_document(
+            document,
+            body.data,
+            spec,
+            body.use_samples,
+            fonts=request.app.state.fonts,
+            images=request.app.state.images,
+            allow_missing_assets=True,
+        )
+    except ValueError as error:
+        raise HTTPException(422, error_detail(error)) from error
+    backend = planning_backend(request, session, body.destination_id, allow_unassigned=True)
+    cost = None
+    if body.tape_profile is not None:
+        profile = get(session, TapeProfile, body.tape_profile)
+        if profile.width_mm != output.document.width_mm:
+            raise HTTPException(422, Message("serverMessages.templateAndTapeWidthsDoNotMatch"))
+        from app.media import require_matching_media
+
+        try:
+            require_matching_media(output.document.media, profile)
+        except ValueError as error:
+            raise HTTPException(422, error_detail(error)) from error
+        from app.authn.authorization import rendering_destination
+
+        destination = rendering_destination(
+            request, session, body.destination_id, allow_unassigned=True
+        )
+        cost = estimate_cost(
+            request,
+            session,
+            destination,
+            profile.id,
+            [
+                LabelGeometry(
+                    str(index),
+                    profile.width_mm,
+                    output.document.length_mm,
+                    spec.horizontal_dpi,
+                    spec.dpi,
+                    output.template_padding_mm,
+                )
+                for index in range(body.copies)
+            ],
+        )
+    return {
+        "cost_estimate": cost,
+        "print_plan": geometry_plan(
+            backend,
+            output.document.width_mm,
+            output.document.length_mm,
+            spec.horizontal_dpi,
+            spec.dpi,
+            template_padding_mm=output.template_padding_mm,
+        )
+        if backend
+        else None,
+        "png": output.preview(foreground, background),
+        "design_png": output.preview(foreground, background, smooth=True),
+        "svg": output.editor_svg() if body.embed_fonts else output.svg,
+        "pixel_width": output.image.width,
+        "pixel_height": output.image.height,
+        "warnings": output.warnings,
+        "missing_assets": output.missing_assets,
+        "printable": not output.missing_assets,
+        "length_mm": output.document.length_mm,
+        "width_mm": output.document.width_mm,
+        "resolved_elements": [e.model_dump() for e in output.document.elements],
+    }
+
+
+@router.post("/jobs", status_code=201)
+def create_job(
+    body: JobInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    body.destination_id = submission_destination(request, session, body.destination_id)
+    access_context(request).require_printer(body.destination_id, "submit_directly")
+    fingerprint = input_fingerprint(body.model_dump())
+    existing = submitted_job(request, session, fingerprint)
+    if existing is not None:
+        return existing
+    profile = get(session, TapeProfile, body.tape_profile)
+    template = get(session, LabelTemplate, body.template)
+    if template.archived:
+        raise HTTPException(409, Message("serverMessages.templateIsArchived"))
+    with rendering(
+        request, session, body.model_dump(mode="json"), destination_id=body.destination_id
+    ):
+        job = build_job(
+            body,
+            profile,
+            template,
+            rendering_spec(request, template.document, body.destination_id),
+            request.app.state.fonts,
+            request.app.state.images,
+            context=access_context(request),
+        )
+    existing = submitted_job(request, session, fingerprint)
+    if existing is not None:
+        return existing
+    from app.accounts.pricing import accept_quote
+
+    accept_quote(
+        request,
+        session,
+        job,
+        body.quote_id,
+        body.maximum_price.model_dump() if body.maximum_price else None,
+    )
+    return save_submission(request, session, job, fingerprint)
+
+
+def image_job_document(
+    body: ImageJobInput, request: Request, session: Session
+) -> tuple[TapeProfile, TemplateDocument]:
+    profile = get(session, TapeProfile, body.tape_profile)
+    try:
+        from app.media import MediaProperties, require_matching_media
+
+        require_matching_media(MediaProperties(), profile)
+        asset = request.app.state.images.metadata(body.image_asset)
+        access_context(request).require(
+            Action.READ, Resource("image_asset", body.image_asset, asset["owner_id"])
+        )
+        document = image_document(
+            body,
+            profile.width_mm,
+            rendering_spec(request, body.model_dump(), body.destination_id),
+            request.app.state.images,
+        )
+    except ValueError as error:
+        raise HTTPException(422, error_detail(error)) from error
+    return profile, document
+
+
+@router.post("/image-jobs/preview")
+def preview_image_job(
+    body: ImageJobInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    profile, document = image_job_document(body, request, session)
+    return preview_record(
+        PreviewInput(
+            document=document,
+            foreground=profile.foreground,
+            background=profile.background,
+            destination_id=body.destination_id,
+            tape_profile=body.tape_profile,
+            copies=body.copies,
+        ),
+        request,
+        session,
+    )
+
+
+@router.post("/image-jobs", status_code=201)
+def create_image_job(
+    body: ImageJobInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    # Share the key namespace with template submissions, but never their fingerprints.
+    body.destination_id = submission_destination(request, session, body.destination_id)
+    access_context(request).require_printer(body.destination_id, "submit_directly")
+    fingerprint = input_fingerprint(body.model_dump(), "image_job")
+    existing = submitted_job(request, session, fingerprint)
+    if existing is not None:
+        return existing
+    profile, document = image_job_document(body, request, session)
+    with rendering(request, session, body.model_dump(), destination_id=body.destination_id):
+        template = LabelTemplate(
+            id="image",
+            name="Image label",
+            revision=1,
+            document=document.model_dump(),
+            owner_id=access_context(request).actor.id,
+        )
+        job = build_job(
+            JobInput(
+                template="image",
+                process_name=body.process_name,
+                billing=body.billing,
+                tape_profile=profile.id,
+                copies=body.copies,
+                notify_on_completion=body.notify_on_completion,
+                data={},
+                destination_id=body.destination_id,
+            ),
+            profile,
+            template,
+            rendering_spec(request, document, body.destination_id),
+            request.app.state.fonts,
+            request.app.state.images,
+            context=access_context(request),
+        )
+    existing = submitted_job(request, session, fingerprint)
+    if existing is not None:
+        return existing
+    from app.accounts.pricing import accept_quote
+
+    accept_quote(
+        request,
+        session,
+        job,
+        body.quote_id,
+        body.maximum_price.model_dump() if body.maximum_price else None,
+    )
+    return save_submission(request, session, job, fingerprint)
+
+
+@router.get("/jobs")
+def list_jobs(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    copy_state: State | None = None,
+    profile_id: str | None = None,
+    destination_id: str | None = None,
+    session: Session = Depends(db, scope="function"),
+) -> list[dict[str, Any]]:
+    if not 1 <= limit <= 500 or offset < 0:
+        raise HTTPException(422, Message("serverMessages.invalidPagination"))
+    query = visible_jobs(request, session, select(PrintJob))
+    if destination_id is not None:
+        query = query.where(PrintJob.destination_id == destination_id)
+    if profile_id is not None:
+        query = query.where(PrintJob.profile_id == profile_id)
+    if copy_state is not None:
+        query = query.where(
+            select(LabelCopy.id)
+            .where(
+                LabelCopy.job_id == PrintJob.id,
+                LabelCopy.state == copy_state,
+            )
+            .exists()
+        )
+    return [
+        job_record(session, job)
+        for job in session.scalars(
+            query.order_by(PrintJob.created_at.desc(), PrintJob.id).offset(offset).limit(limit)
+        )
+    ]
+
+
+@router.get("/queue/groups")
+def queue_groups(
+    request: Request,
+    limit: int = 25,
+    offset: int = 0,
+    copy_state: State | None = None,
+    profile_id: str | None = None,
+    destination_id: str | None = None,
+    session: Session = Depends(db, scope="function"),
+) -> list[dict[str, Any]]:
+    if not 1 <= limit <= 100 or offset < 0:
+        raise HTTPException(422, Message("serverMessages.invalidPagination"))
+    query = visible_jobs(request, session, select(PrintJob))
+    if destination_id is not None:
+        query = query.where(PrintJob.destination_id == destination_id)
+    if profile_id is not None:
+        query = query.where(PrintJob.profile_id == profile_id)
+    if copy_state is not None:
+        query = query.where(
+            select(LabelCopy.id)
+            .where(LabelCopy.job_id == PrintJob.id, LabelCopy.state == copy_state)
+            .exists()
+        )
+    key = func.coalesce(PrintJob.run_id, PrintJob.id)
+    keys = session.execute(
+        query.with_only_columns(key, func.max(PrintJob.created_at))
+        .group_by(key)
+        .order_by(func.max(PrintJob.created_at).desc(), key)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    result = []
+    for identifier, _ in keys:
+        jobs = list(
+            session.scalars(
+                query.where(key == identifier).order_by(PrintJob.run_position, PrintJob.id)
+            )
+        )
+        run = session.get(PrintRun, jobs[0].run_id) if jobs[0].run_id else None
+        records = [job_record(session, job) for job in jobs]
+        has_queued = any(label["state"] == "queued" for job in records for label in job["labels"])
+        saved_plan = (run.manifest if run else jobs[0].template_snapshot).get("print_plan")
+        cost = None
+        if has_queued:
+            from app.printing.print_planning import queued_geometry
+
+            cost = estimate_cost(
+                request,
+                session,
+                jobs[0].destination_id,
+                jobs[0].profile_id,
+                queued_geometry(records),
+            )
+        result.append(
+            {
+                "cost_estimate": cost,
+                "id": identifier,
+                "run_id": run.id if run else None,
+                "name": run.name if run else None,
+                "jobs": records,
+                "print_plan": queued_plan(request, session, records) if has_queued else saved_plan,
+                "print_plan_scope": "queued" if has_queued else "submission",
+            }
+        )
+    return result
+
+
+@router.get("/jobs/{identifier}")
+def job(identifier: str, session: Session = Depends(db, scope="function")) -> dict[str, Any]:
+    return job_record(session, get(session, PrintJob, identifier))
+
+
+@router.get("/jobs/{identifier}/preview")
+def job_preview(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> Response:
+    item = get(session, PrintJob, identifier)
+    label = session.scalar(select(LabelCopy).where(LabelCopy.job_id == identifier).limit(1))
+    if label is None:
+        raise HTTPException(404, Message("serverMessages.labelCopyNotFound"))
+    return label_preview_response(request, session, item, label)
+
+
+@router.put("/jobs/{identifier}/copies")
+def update_job_copies(
+    identifier: str,
+    body: CopyCountInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    item = get(session, PrintJob, identifier)
+    context = access_context(request)
+    context.require_printer(
+        item.destination_id,
+        "submit_directly" if item.owner_id == context.actor.id else "manage_queue",
+    )
+    require_record(request, item, Action.WRITE)
+    if blocker := copy_count_blocker(session, item, request.app.state.fleet.enforce_job_access):
+        raise HTTPException(409, blocker)
+    if body.expected_copies != item.copies:
+        raise HTTPException(
+            409, Message("serverMessages.theCopyCountChangedRefreshTheQueueBeforeEditingIt")
+        )
+    if (
+        item.template_snapshot.get("pricing") or item.template_snapshot.get("retry")
+    ) and body.copies > item.copies:
+        raise HTTPException(
+            409, Message("serverMessages.additionalCopiesNeedANewPriceQuoteSubmitThemAsANewLabel")
+        )
+    labels = list(
+        session.scalars(
+            select(LabelCopy).where(LabelCopy.job_id == item.id).order_by(LabelCopy.ordinal)
+        )
+    )
+    if body.copies < len(labels):
+        for label in labels[body.copies :]:
+            session.delete(label)
+    else:
+        session.add_all(
+            LabelCopy(job_id=item.id, ordinal=index) for index in range(len(labels), body.copies)
+        )
+    item.copies = body.copies
+    session.flush()
+    return job_record(session, item)
+
+
+@router.put("/jobs/{identifier}/completion-notification")
+def update_completion_notification(
+    identifier: str,
+    body: CompletionNotificationInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    item = get(session, PrintJob, identifier)
+    if item.owner_id != access_context(request).actor.id:
+        raise HTTPException(
+            403, Message("serverMessages.onlyTheOwnerCanChangeThisNotificationPreference")
+        )
+    item.notify_on_completion = body.notify_on_completion
+    if not body.notify_on_completion:
+        from app.notifications.notification_routing import refresh_summary
+
+        for notice in session.scalars(
+            select(Notification).where(
+                Notification.kind == "job_printed",
+                Notification.context["job_id"].as_string() == item.id,
+                Notification.delivered_at.is_(None),
+            )
+        ):
+            notice.cancelled = True
+            for delivery in session.scalars(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notice.id,
+                    NotificationDelivery.delivered_at.is_(None),
+                )
+            ):
+                delivery.cancelled = True
+            refresh_summary(session, notice)
+    session.flush()
+    return job_record(session, item)
+
+
+def label_preview_response(
+    request: Request, session: Session, item: PrintJob, label: LabelCopy
+) -> Response:
+    if session.new or session.dirty or session.deleted:
+        raise RuntimeError("Saved label previews require a read-only transaction")
+    profile = session.get(TapeProfile, item.profile_id)
+    if profile is None:
+        raise HTTPException(404, Message("serverMessages.tapeProfileNotFound"))
+    foreground, background = profile.foreground, profile.background
+    # Preview routes are read-only. Return their connection before asset stores
+    # open short read transactions, otherwise concurrent previews can fill the
+    # pool while each waits for a second connection. Our session factory keeps
+    # the loaded print snapshot available after commit (expire_on_commit=False).
+    session.commit()
+    try:
+        rendered = render_job(
+            item,
+            label,
+            request.app.state.fonts,
+            request.app.state.images,
+            allow_missing_assets=True,
+        )
+    except (ValueError, OSError) as error:
+        raise HTTPException(
+            422, Message("serverMessages.savedLabelPreviewIsUnavailable")
+        ) from error
+    # Use the same packed ink raster as printing, including legacy fixture jobs.
+    ink = Image.frombytes("1", (rendered.pixel_width, rendered.pixel_height), rendered.raster)
+    output = io.BytesIO()
+    ImageOps.colorize(ink.convert("L"), black=background, white=foreground).save(
+        output, format="PNG"
+    )
+    return Response(
+        output.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.delete("/jobs/{identifier}")
+def cancel_job(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    item = get(session, PrintJob, identifier)
+    require_record(request, item, Action.DELETE)
+    copies = list(session.scalars(select(LabelCopy).where(LabelCopy.job_id == identifier)))
+    if not any(c.state == State.QUEUED for c in copies) and any(
+        c.state in (State.PRINTING, State.NEEDS_REVIEW) for c in copies
+    ):
+        raise HTTPException(
+            409, Message("serverMessages.useBatchReviewForPrintingOrUncertainCopies")
+        )
+    for label in copies:
+        if label.state == State.QUEUED:
+            label.state = State.CANCELLED
+    session.flush()
+    return job_record(session, item)
+
+
+@router.post("/queue/remove")
+def remove_selected(
+    body: CopySelectionInput, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, int]:
+    wanted = set(body.copy_ids)
+    if len(wanted) != len(body.copy_ids):
+        raise HTTPException(422, Message("serverMessages.selectEachCopyOnlyOnce"))
+    copies = list(session.scalars(select(LabelCopy).where(LabelCopy.id.in_(wanted))))
+    if len(copies) != len(wanted) or any(copy.state != State.QUEUED for copy in copies):
+        raise HTTPException(
+            409, Message("serverMessages.selectionChangedRefreshTheQueueBeforeRemovingItems")
+        )
+    job_ids = {copy.job_id for copy in copies}
+    for identifier in job_ids:
+        require_record(request, get(session, PrintJob, identifier), Action.WRITE)
+    for label in copies:
+        label.state = State.CANCELLED
+    return {"removed_copies": len(copies)}
+
+
+@router.post("/queue/print", status_code=202)
+def flush_queue(
+    body: CopySelectionInput | None = None,
+    session: Session = Depends(db, scope="function"),
+    printer_id: str | None = None,
+    destination_id: str | None = None,
+) -> dict[str, Any]:
+    return reserve_flush(session, printer_id, destination_id, body)
+
+
+@router.delete("/queue/flush/{identifier}")
+def cancel_flush(
+    identifier: str, session: Session = Depends(db, scope="function")
+) -> dict[str, bool]:
+    pending = get(session, FlushRequest, identifier)
+    if pending.completed:
+        raise HTTPException(409, Message("serverMessages.thisFlushHasAlreadyStartedOrCompleted"))
+    pending.completed = True
+    return {"cancelled": True}
+
+
+def batch_process_names(session: Session, batch: Batch) -> list[str]:
+    names = []
+    jobs = session.scalars(
+        select(PrintJob)
+        .join(LabelCopy, LabelCopy.job_id == PrintJob.id)
+        .join(BatchItem, BatchItem.copy_id == LabelCopy.id)
+        .where(BatchItem.batch_id == batch.id)
+        .order_by(BatchItem.position)
+    ).unique()
+    for job in jobs:
+        name = job.template_snapshot.get("process_name") or job_template_name(session, job)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def visible_batches(request: Request, session: Session) -> Select[Batch]:
+    from app.printing.print_activity import visible_items
+
+    query = select(Batch)
+    if not access_context(request).actor.is_admin:
+        query = query.where(
+            or_(
+                Batch.printer_id.in_(visible_destinations(request, session, "view_activity")),
+                Batch.id.in_(visible_items(request, session).with_only_columns(BatchItem.batch_id)),
+            )
+        )
+    return query
+
+
+def batch_history_records(
+    request: Request, session: Session, query: Select[Batch]
+) -> list[dict[str, Any]]:
+    from app.printing.print_activity import activity_record
+
+    return [activity_record(request, session, batch) for batch in session.scalars(query)]
+
+
+@router.get("/batches")
+def batches(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> list[dict[str, Any]]:
+    return batch_history_records(
+        request,
+        session,
+        visible_batches(request, session).order_by(Batch.created_at.desc(), Batch.id).limit(100),
+    )
+
+
+@router.get("/batches/page")
+def batch_page(
+    request: Request,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    before: float | None = Query(default=None, ge=0, allow_inf_nan=False),
+    printer_id: str | None = None,
+    cartridge_id: str | None = None,
+    requester_id: str | None = None,
+    authorizer_id: str | None = None,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    stamp = time.time() if before is None else before
+    query = visible_batches(request, session).where(Batch.created_at <= stamp)
+    from app.printing.print_activity import filter_batches, visible_items
+
+    context = access_context(request)
+    if (
+        printer_id
+        and not context.can_printer(printer_id, "view")
+        and not context.can_printer(printer_id, "view_activity")
+    ) or (cartridge_id and not context.can_cartridge(cartridge_id, "view")):
+        query = query.where(false())
+    query = filter_batches(
+        query,
+        printer_id,
+        cartridge_id,
+        requester_id,
+        authorizer_id,
+        visible_items(request, session),
+    )
+    return {
+        "items": batch_history_records(
+            request,
+            session,
+            query.order_by(Batch.created_at.desc(), Batch.id).offset(offset).limit(limit),
+        ),
+        "total": session.scalar(select(func.count()).select_from(query.subquery())),
+        "before": stamp,
+    }
+
+
+@router.get("/batches/filters")
+def batch_filters(
+    request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    from app.printing.print_activity import filter_options, visible_items
+
+    result = filter_options(
+        session, visible_batches(request, session), visible_items(request, session)
+    )
+    context = access_context(request)
+    result["cartridges"] = [
+        item for item in result["cartridges"] if context.can_cartridge(item["id"], "view")
+    ]
+    result["printers"] = [
+        item
+        for item in result["printers"]
+        if context.can_printer(item["id"], "view")
+        or context.can_printer(item["id"], "view_activity")
+    ]
+    return result
+
+
+@router.get("/batches/{identifier}")
+def batch_detail(
+    identifier: str, request: Request, session: Session = Depends(db, scope="function")
+) -> dict[str, Any]:
+    from app.audit.activity_redaction import personal_attribution
+    from app.printing.print_activity import activity_record, full_activity, readable_batch
+
+    batch = readable_batch(request, session, identifier)
+    full = full_activity(request, batch, review=True)
+    context = access_context(request)
+    from app.printing.batch_reviews import evidence_policy, review_records
+
+    output_plans = {
+        item["copy_id"]: item for item in (batch.print_plan or {}).get("label_output", [])
+    }
+    items: list[dict[str, Any]] = []
+    for item in session.scalars(
+        select(BatchItem).where(BatchItem.batch_id == identifier).order_by(BatchItem.position)
+    ):
+        label = get(session, LabelCopy, item.copy_id)
+        # Physical batch authorization covers every label in this batch, including
+        # jobs routed through groups the reviewer cannot otherwise access.
+        job = session.get(PrintJob, label.job_id)
+        assert job is not None
+        if not full and job.owner_id != context.actor.id:
+            continue
+        information = job_information(session, job, printer_id=batch.printer_id)
+        if not full:
+            if not context.can_printer(batch.printer_id, "view"):
+                information["printer_name"] = "Restricted printer"
+            if not context.can_printer(job.destination_id, "view"):
+                information["destination_name"] = "Restricted destination"
+        items.append(
+            {
+                **record(item),
+                **information,
+                "position": item.position if full else len(items),
+                "attribution": (item.attribution or unknown_attribution())
+                if full
+                else personal_attribution(context, item.attribution or unknown_attribution()),
+                "job_id": job.id,
+                "copy_number": label.ordinal + 1,
+                "output_plan": output_plans.get(label.id) if full else None,
+                "text": job_summary(job),
+                "width_mm": job.width_mm,
+                "length_mm": job.length_mm,
+            }
+        )
+    return {
+        **activity_record(request, session, batch, review=True),
+        "items": items,
+        "evidence_policy": evidence_policy(session),
+        "reviews": review_records(session, batch.id) if full else [],
+    }
+
+
+@router.post("/batches/{identifier}/review")
+def review(
+    identifier: str,
+    body: ReviewInput,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    batch = get(session, Batch, identifier)
+    access_context(request).require_printer(batch.printer_id, "review")
+    from app.printing.batch_reviews import normalize_photo, repeated_review, save_review
+    from app.printing.submissions import input_fingerprint
+
+    fingerprint = input_fingerprint(
+        {"batch_id": identifier, "kind": "review", **body.model_dump(mode="json")}
+    )
+    if repeated_review(session, request, body.request_id, fingerprint):
+        return {**record(batch), **batch_audit(session, batch)}
+    photo = normalize_photo(session, body.evidence_photo)
+    previous = {
+        item.copy_id: item.outcome.value
+        for item in session.scalars(
+            select(BatchItem).where(
+                BatchItem.batch_id == batch.id, BatchItem.copy_id.in_(body.decisions)
+            )
+        )
+    }
+    try:
+        resolve_batch(
+            session,
+            batch,
+            {key: State(value) for key, value in body.decisions.items()},
+            body.consumed_mm,
+            cartridge=get(session, Cartridge, body.cartridge_id) if body.cartridge_id else None,
+        )
+    except ValueError as error:
+        raise HTTPException(409, error_detail(error)) from error
+    save_review(
+        session,
+        request,
+        batch,
+        identifier=body.request_id,
+        fingerprint=fingerprint,
+        kind="review",
+        reason="",
+        previous=previous,
+        decisions={
+            key: "failed" if value == "queued" else value for key, value in body.decisions.items()
+        },
+        photo=photo,
+    )
+    session.flush()
+    return {**record(batch), **batch_audit(session, batch)}
+
+
+@router.get("/batches/{identifier}/items/{copy_id}/preview")
+def batch_item_preview(
+    identifier: str,
+    copy_id: str,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> Response:
+    from app.printing.print_activity import full_activity, readable_batch
+
+    batch = readable_batch(request, session, identifier)
+    if session.get(BatchItem, (identifier, copy_id)) is None:
+        raise HTTPException(404, Message("serverMessages.batchItemNotFound"))
+    label = get(session, LabelCopy, copy_id)
+    item = session.get(PrintJob, label.job_id)
+    assert item is not None
+    if (
+        not full_activity(request, batch, review=True)
+        and item.owner_id != access_context(request).actor.id
+    ):
+        raise HTTPException(404, Message("serverMessages.batchItemNotFound"))
+    return label_preview_response(request, session, item, label)
+
+
+@router.post("/batches/{identifier}/items/{copy_id}/requeue", status_code=201)
+def requeue_batch_item(
+    identifier: str,
+    copy_id: str,
+    request: Request,
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    batch = get(session, Batch, identifier)
+    access_context(request).require_printer(batch.printer_id, "submit_directly")
+    attempt = session.get(BatchItem, (identifier, copy_id))
+    if attempt is None:
+        raise HTTPException(404, Message("serverMessages.batchItemNotFound"))
+    raise HTTPException(
+        409, Message("serverMessages.chooseRetryFundingInTheBatchDetailsBeforeRequeueingLabels")
+    )
+
+
+def notification_history_records(
+    session: Session, query: Select[Notification]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            **record(n),
+            "deliveries": [
+                {
+                    "account_name": username
+                    or ("Deleted account" if owner_id else "Shared endpoint"),
+                    **{
+                        key: getattr(delivery, key)
+                        for key in (
+                            "endpoint_name",
+                            "attempts",
+                            "next_attempt_at",
+                            "delivered_at",
+                            "cancelled",
+                            "last_error",
+                        )
+                    },
+                }
+                for delivery, owner_id, username in session.execute(
+                    select(NotificationDelivery, NotificationEndpoint.owner_id, User.username)
+                    .join(
+                        NotificationEndpoint,
+                        NotificationEndpoint.id == NotificationDelivery.endpoint_id,
+                    )
+                    .outerjoin(User, User.id == NotificationEndpoint.owner_id)
+                    .where(NotificationDelivery.notification_id == n.id)
+                )
+            ],
+        }
+        for n in session.scalars(query)
+    ]
+
+
+@router.get("/notifications")
+def notifications(session: Session = Depends(db, scope="function")) -> list[dict[str, Any]]:
+    return notification_history_records(
+        session,
+        select(Notification).order_by(Notification.created_at.desc(), Notification.id).limit(100),
+    )
+
+
+@router.get("/notifications/page")
+def notification_page(
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    before: float | None = Query(default=None, ge=0, allow_inf_nan=False),
+    session: Session = Depends(db, scope="function"),
+) -> dict[str, Any]:
+    stamp = time.time() if before is None else before
+    query = select(Notification).where(Notification.created_at <= stamp)
+    return {
+        "items": notification_history_records(
+            session,
+            query.order_by(Notification.created_at.desc(), Notification.id)
+            .offset(offset)
+            .limit(limit),
+        ),
+        "total": session.scalar(select(func.count()).select_from(query.subquery())),
+        "before": stamp,
+    }

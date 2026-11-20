@@ -1,0 +1,297 @@
+<script setup lang="ts">
+import { t } from '../shared/i18n'
+import { freezeLeavingItem } from '../shared/collectionMotion'
+import { vValidateForm } from '../shared/formValidation'
+import { storeToRefs } from 'pinia'
+import { confirmAction } from '../shared/confirmation'
+import { reactive, ref } from 'vue'
+import ExpandableContent from '../components/ExpandableContent.vue'
+import { api } from '../shared/api'
+import { useWorkspaceStore, date } from '../shared/workspace'
+import type { Profile, ProfileInput } from '../shared/types'
+import { mediaLabel } from '../printing/media'
+const w = useWorkspaceStore()
+const { profiles, busy, status } = storeToRefs(w)
+const editing = ref<string | null>(null),
+  formOpen = ref(false)
+const defaults = (): ProfileInput => ({
+  name: '',
+  width_mm: 24,
+  media_family: 'tze',
+  label_length_mm: null,
+  foreground: '#000000',
+  background: '#ffffff',
+  auto_print_threshold: 10,
+  waiting_notification_enabled: false,
+  waiting_notification_interval_seconds: 86400,
+})
+const form = reactive(defaults()),
+  intervalHours = ref(24)
+const snoozeProfile = ref<string | null>(null),
+  snoozeUntil = ref('')
+let snoozeButton: HTMLElement | null = null
+function openSnooze(id: string, event: MouseEvent) {
+  snoozeButton = event.currentTarget as HTMLElement
+  snoozeProfile.value = id
+}
+function closeSnooze() {
+  snoozeProfile.value = null
+  snoozeButton?.focus()
+}
+function edit(profile?: Profile) {
+  editing.value = profile?.id ?? null
+  Object.assign(
+    form,
+    defaults(),
+    profile
+      ? Object.fromEntries(
+          Object.keys(defaults()).map((key) => [key, profile[key as keyof Profile]]),
+        )
+      : {},
+  )
+  intervalHours.value = form.waiting_notification_interval_seconds / 3600
+  formOpen.value = true
+}
+async function save() {
+  const intervalSeconds = Math.round(intervalHours.value * 3600)
+  const body = {
+    ...form,
+    label_length_mm: form.media_family === 'fixed_label' ? form.label_length_mm : null,
+    waiting_notification_interval_seconds:
+      !form.waiting_notification_enabled &&
+      (!Number.isFinite(intervalSeconds) || intervalSeconds < 60)
+        ? form.waiting_notification_interval_seconds
+        : intervalSeconds,
+  }
+  if (
+    await w.action(
+      () =>
+        api(
+          `/tape-profiles${editing.value ? `/${editing.value}` : ''}`,
+          editing.value ? 'PUT' : 'POST',
+          body,
+        ),
+      t('uiMessages.tapeProfileSavedItsThresholdIsEffectiveImmediately'),
+    )
+  )
+    formOpen.value = false
+}
+async function remove(profile: Profile) {
+  if (await confirmAction(t('uiDetails.deleteProfile', { value1: String(profile.name) })))
+    await w.action(
+      () => api(`/tape-profiles/${profile.id}`, 'DELETE'),
+      t('uiMessages.tapeProfileDeleted'),
+    )
+}
+async function setAvailability(profile: Profile) {
+  const available = profile.available === false
+  await w.action(
+    () => api(`/tape-profiles/${profile.id}/availability`, 'PUT', { available }),
+    available
+      ? t('uiMessages.tapeProfileAvailable')
+      : t('uiMessages.tapeProfileUnavailableForNewLabels'),
+  )
+}
+async function reminder(id: string, action: 'silence' | 'resume' | 'snooze') {
+  const body = {
+    action,
+    ...(action === 'snooze' ? { until: new Date(snoozeUntil.value).getTime() / 1000 } : {}),
+  }
+  if (
+    await w.action(
+      () => api(`/tape-profiles/${id}/reminder`, 'PUT', body),
+      t('uiMessages.reminderSettingUpdated'),
+    )
+  )
+    if (snoozeProfile.value) closeSnooze()
+}
+</script>
+<template>
+  <div class="section-heading">
+    <button class="secondary" @click="edit()">{{ $t('profiles.addTapeProfile') }}</button>
+  </div>
+  <Transition name="panel-expand">
+    <form v-validate-form v-if="formOpen" class="panel form-stack" @submit.prevent="save">
+      <div class="section-heading">
+        <h2>{{ editing ? $t('uiMessages.editTapeProfile') : $t('uiMessages.newTapeProfile') }}</h2>
+        <button type="button" class="text-button" @click="formOpen = false">
+          {{ $t('common.close') }}
+        </button>
+      </div>
+      <div class="field-row">
+        <label
+          >{{ $t('profiles.profileName')
+          }}<input
+            v-model="form.name"
+            required
+            maxlength="100"
+            :placeholder="$t('profiles.blackOnYellow24Mm')" /></label
+        ><label
+          >{{ $t('profiles.mediaFamily')
+          }}<select v-model="form.media_family">
+            <option value="tze">{{ $t('common.tzeContinuousTape') }}</option>
+            <option value="fixed_label">{{ $t('profiles.fixedSizeLabels') }}</option>
+          </select></label
+        ><label v-if="form.media_family !== 'fixed_label'"
+          >{{ $t('common.tapeWidth')
+          }}<select v-model.number="form.width_mm">
+            <option v-for="width in [3.5, 6, 9, 12, 18, 24]" :key="width" :value="width">
+              {{ width }} {{ $t('common.mm') }}
+            </option>
+          </select></label
+        >
+        <label v-else
+          >{{ $t('profiles.labelWidthMm')
+          }}<input
+            v-model.number="form.width_mm"
+            type="number"
+            min="0.1"
+            max="100"
+            step="any"
+            required
+        /></label>
+      </div>
+      <ExpandableContent :open="form.media_family === 'fixed_label'">
+        <label
+          >{{ $t('common.stockLabelLengthMm')
+          }}<input
+            v-model.number="form.label_length_mm"
+            type="number"
+            min="10"
+            max="300"
+            step="any"
+            :required="form.media_family === 'fixed_label'"
+            :disabled="form.media_family !== 'fixed_label'"
+        /></label>
+      </ExpandableContent>
+      <div class="field-row">
+        <label>{{ $t('common.textColor') }}<input type="color" v-model="form.foreground" /></label
+        ><label>{{ $t('common.tapeColor') }}<input type="color" v-model="form.background" /></label
+        ><label
+          >{{ $t('profiles.automaticBatchThreshold')
+          }}<input
+            v-model.number="form.auto_print_threshold"
+            type="number"
+            min="1"
+            max="10000"
+            required
+        /></label>
+      </div>
+      <label class="checkbox"
+        ><input v-model="form.waiting_notification_enabled" type="checkbox" />{{
+          $t('profiles.remindMeWhenThisTapeIsWaitingAboveIts')
+        }}</label
+      >
+      <ExpandableContent :open="form.waiting_notification_enabled">
+        <label
+          >{{ $t('profiles.repeatReminderEveryHours')
+          }}<input
+            v-model.number="intervalHours"
+            type="number"
+            min="0.017"
+            step="any"
+            required
+            :disabled="!form.waiting_notification_enabled"
+        /></label>
+      </ExpandableContent>
+      <p class="help">
+        {{ $t('common.thresholdsCountPhysicalCopiesLoweringAnInstalledTapeS') }}
+      </p>
+      <button class="primary" :disabled="busy" type="submit">
+        {{ $t('common.saveTapeProfile') }}
+      </button>
+    </form>
+  </Transition>
+  <div v-if="!profiles.length && !formOpen" class="panel empty">
+    <h2>{{ $t('common.noTapeProfiles') }}</h2>
+    <button class="primary" @click="edit()">{{ $t('profiles.createFirstTapeProfile') }}</button>
+  </div>
+  <TransitionGroup
+    v-if="profiles.length"
+    tag="div"
+    class="card-grid"
+    name="collection"
+    @before-leave="freezeLeavingItem"
+  >
+    <article v-for="profile in profiles" :key="profile.id" class="panel profile-card">
+      <div class="section-heading">
+        <span
+          class="swatch large"
+          :style="{ background: profile.background, color: profile.foreground }"
+          >{{ $t('common.aa') }}</span
+        ><span class="badge">{{ mediaLabel(profile) }}</span>
+      </div>
+      <h2>{{ profile.name }}</h2>
+      <ExpandableContent :open="profile.available === false">
+        <span class="badge">{{ $t('common.unavailable') }}</span>
+      </ExpandableContent>
+      <p>
+        {{ status?.queues.find((q) => q.profile_id === profile.id)?.queued_copies ?? 0 }}
+        {{ $t('common.queuedPrintsAt') }} {{ profile.auto_print_threshold }}
+        {{ $t('common.copies2') }}
+      </p>
+      <div class="profile-meta">
+        <span>{{ $t('common.waitingReminders') }}</span
+        ><strong>{{
+          profile.waiting_notification_enabled
+            ? $t('uiDetails.intervalHours', {
+                value1: String(+(profile.waiting_notification_interval_seconds / 3600).toFixed(2)),
+              })
+            : $t('accountSettings.off')
+        }}</strong>
+      </div>
+      <p v-if="profile.reminder_silenced" class="inline-warning">
+        {{ $t('common.silencedForThisWaitingEpisode') }}
+      </p>
+      <p
+        v-else-if="
+          profile.reminder_snoozed_until && profile.reminder_snoozed_until > Date.now() / 1000
+        "
+        class="help"
+      >
+        {{ $t('common.snoozedUntil') }} {{ date(profile.reminder_snoozed_until) }}
+      </p>
+      <div v-if="profile.waiting_notification_enabled" class="row wrap">
+        <button class="small" :disabled="busy" @click="reminder(profile.id, 'silence')">
+          {{ $t('common.silenceEpisode') }}</button
+        ><button class="small" @click="openSnooze(profile.id, $event)">
+          {{ $t('common.snooze') }}</button
+        ><button class="small" :disabled="busy" @click="reminder(profile.id, 'resume')">
+          {{ $t('profiles.resume') }}
+        </button>
+      </div>
+      <Transition name="panel-expand">
+        <form
+          v-if="snoozeProfile === profile.id"
+          v-validate-form
+          class="form-stack inset"
+          @submit.prevent="reminder(profile.id, 'snooze')"
+        >
+          <label
+            >{{ $t('common.snoozeUntilLocalTime')
+            }}<input v-model="snoozeUntil" type="datetime-local" required
+          /></label>
+          <div class="row wrap">
+            <button class="secondary" :disabled="busy">{{ $t('common.setSnooze') }}</button>
+            <button type="button" :disabled="busy" @click="closeSnooze">
+              {{ $t('common.cancel') }}
+            </button>
+          </div>
+        </form>
+      </Transition>
+      <div class="card-actions">
+        <button class="text-button" :disabled="busy" @click="setAvailability(profile)">
+          {{
+            profile.available === false
+              ? $t('uiMessages.makeAvailable')
+              : $t('uiMessages.markUnavailable')
+          }}
+        </button>
+        <button class="text-button" @click="edit(profile)">{{ $t('profiles.editProfile') }}</button
+        ><button class="text-button danger-text" :disabled="busy" @click="remove(profile)">
+          {{ $t('common.delete') }}
+        </button>
+      </div>
+    </article>
+  </TransitionGroup>
+</template>
