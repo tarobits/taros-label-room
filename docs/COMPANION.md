@@ -124,6 +124,36 @@ It accepts a JSON array of stable local IDs, names, drivers, and configurations.
 It seeds missing registrations only; it never overwrites web edits or restores a
 printer removed through the interface.
 
+## FoxOE Stream Deck controls
+
+The companion can use [FoxOE's browser bridge](https://github.com/tarobits/foxoe/blob/main/docs/API.md)
+for PIN entry and printer selection. It activates when FoxOE connects to the
+companion page; normal touch and keyboard controls remain available without it.
+
+1. Install and pair FoxOE's Chromium extension, then select its kiosk tab as
+   described in [FoxOE's setup guide](https://github.com/tarobits/foxoe#raspberry-pi-usb-and-kiosk-setup).
+2. In FoxOE Settings → Applications, add the companion's actual web URL and
+   choose the printer icon. Open that app from the FoxOE dock in the selected tab.
+3. The deck offers **Unlock**, user selection when needed, and the PIN keypad.
+   After unlocking, it shows the printers the current user can view. Pressing a
+   printer opens or closes its existing controls; lists longer than twelve
+   printers have Previous and Next keys. FoxOE retains key 15 for Home.
+
+PIN input uses the companion's existing validation, length limit, masking, and
+configured keypad shuffling. The deck does not display or receive the entered
+PIN as a label or value. Touch and deck input share the same field, including
+backspace and clear. Failed unlock attempts clear the field as usual.
+
+Actions are disabled while the companion is busy or offline, or another dialog
+or packing view is open. Old layouts and disconnected key presses are ignored.
+Reconnecting restores the current screen. Printer selection counts as activity
+for the existing inactivity lock; merely connecting the deck does not.
+
+This integration uses dynamic layouts and needs no registration credential in
+the companion, no connection to FoxOE's network registration port, and no browser
+access to its loopback API. The FoxOE app entry and extension pairing are required.
+Printing and queue actions remain on the touchscreen in this first integration.
+
 ## Read-only status API for external displays
 
 Set `LABEL_COMPANION_STATUS_API_KEY` in the companion's private `.env.companion`

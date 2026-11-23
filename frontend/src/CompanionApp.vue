@@ -34,6 +34,7 @@ import {
 import { checkServer, serverUnavailable } from './shared/serverConnection'
 import { mediaLabel, compatibleProfile } from './printing/media'
 import { reloadUpdatedCompanion } from './companion/companionUpdates'
+import { createFoxoeDeck, type DeckButton, type DeckScreen } from './companion/foxoeDeck'
 import {
   accountLanguage,
   browserLanguage,
@@ -103,6 +104,7 @@ const connectionLabel = computed(() =>
       : t('common.mainServerOfflineReconnecting'),
 )
 const unlockPanel = ref<HTMLElement>()
+const pinEntry = ref<InstanceType<typeof PinEntry>>()
 const error = ref(''),
   success = ref(''),
   busy = ref(false),
@@ -457,6 +459,172 @@ function openControls(printer: LocalPrinter) {
   copyIds.value = []
   if (selected.value) void loadQueue().catch((issue) => (error.value = errorMessage(issue)))
 }
+
+// FoxOE is an optional input surface. It never logs in, selects hidden printers,
+// or bypasses a form's validation. Touch and hardware always share these handlers.
+let foxoe: ReturnType<typeof createFoxoeDeck> | undefined
+let dialogObserver: MutationObserver | undefined
+const otherDialog = ref(false)
+const deckPage = ref(0)
+watch([unlocking, userId, () => station.value?.locked], () => {
+  deckPage.value = 0
+})
+function hasOtherDialog() {
+  return [...document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"]')].some(
+    (dialog) => !dialog.classList.contains('station-unlock-dialog'),
+  )
+}
+const deckScreen = computed<DeckScreen>(() => {
+  const disabled =
+    !stationReachable.value ||
+    serverUnavailable.value ||
+    !station.value?.online ||
+    busy.value ||
+    otherDialog.value ||
+    !!config.value ||
+    adding.value ||
+    !!packingPrinter.value
+  function button(
+    id: string,
+    label: string,
+    icon: DeckButton['icon'],
+    run: () => void,
+    unavailable = false,
+  ): DeckButton {
+    return {
+      id,
+      label,
+      icon,
+      disabled: disabled || unavailable,
+      run: () => {
+        // Recheck immediately: a dialog can open before the DOM observer runs.
+        if (disabled || unavailable || busy.value || hasOtherDialog()) return
+        touch()
+        run()
+      },
+    }
+  }
+  function paged(items: DeckButton[], cancel?: DeckButton) {
+    const size = cancel ? 11 : 12
+    const page = Math.min(deckPage.value, Math.max(0, Math.ceil(items.length / size) - 1))
+    const result: (DeckButton | null)[] = items.slice(page * size, (page + 1) * size)
+    while (result.length < size) result.push(null)
+    result.push(
+      button(
+        'previous',
+        t('common.previous'),
+        'back',
+        () => {
+          deckPage.value = page - 1
+        },
+        page === 0,
+      ),
+    )
+    result.push(
+      button(
+        'next',
+        t('common.next'),
+        'play',
+        () => {
+          deckPage.value = page + 1
+        },
+        (page + 1) * size >= items.length,
+      ),
+    )
+    if (cancel) result.push(cancel)
+    return result
+  }
+  if (!station.value) return { context: 'loading', buttons: [] }
+  if (station.value.locked) {
+    if (!unlocking.value)
+      return {
+        context: 'locked',
+        buttons: [button('unlock', t('common.unlock'), 'keypad', openUnlock)],
+      }
+    const cancel = button('cancel', t('common.cancel'), 'close', closeUnlock)
+    if (!userId.value)
+      return {
+        context: `users:${deckPage.value}:${station.value.users.map((user) => user.id).join(',')}`,
+        buttons: paged(
+          station.value.users.map((user, index) =>
+            button(`user.${index}`, user.username, 'window', () => {
+              void chooseUser(user.id)
+            }),
+          ),
+          cancel,
+        ),
+      }
+    if (!pinEntry.value) return { context: 'pin-loading', buttons: [] }
+    const digits = pinEntry.value.digits.map((digit) =>
+      button(
+        `digit.${digit}`,
+        digit,
+        'keypad',
+        () => pinEntry.value?.press(digit),
+        pin.value.length >= 12,
+      ),
+    )
+    // Match the 5×3 physical keypad arrangement; shuffled digits come directly
+    // from PinEntry, so the touch and hardware layouts change together.
+    return {
+      context: `pin:${userId.value}:${pinAttempt.value}`,
+      buttons: [
+        ...digits.slice(0, 3),
+        button(
+          'backspace',
+          t('pinEntry.backspace'),
+          'backspace',
+          () => pinEntry.value?.press('backspace'),
+          !pin.value.length,
+        ),
+        cancel,
+        ...digits.slice(3, 6),
+        digits[9]!,
+        button(
+          'confirm',
+          t('common.unlock'),
+          'check',
+          () => {
+            unlockPanel.value?.querySelector<HTMLFormElement>('form.station-pin')?.requestSubmit()
+          },
+          !/^[0-9]{4,12}$/.test(pin.value),
+        ),
+        ...digits.slice(6, 9),
+        button(
+          'clear',
+          t('pinEntry.clear'),
+          'close',
+          () => pinEntry.value?.press('clear'),
+          !pin.value.length,
+        ),
+      ],
+    }
+  }
+  return {
+    context: `printers:${station.value.user?.id}:${deckPage.value}:${selected.value}:${station.value.printers.map((printer) => printer.local_id).join(',')}`,
+    buttons: paged(
+      station.value.printers
+        .filter((printer) => can(printer.id, 'view'))
+        .map((printer, index) =>
+          button(
+            `printer.${index}`,
+            printer.name,
+            selected.value === printer.local_id ? 'check' : 'printer',
+            () => {
+              openControls(printer)
+              void nextTick(() =>
+                document
+                  .getElementById(`station-printer-${printer.local_id}`)
+                  ?.scrollIntoView({ block: 'nearest' }),
+              )
+            },
+            !operational.value,
+          ),
+        ),
+    ),
+  }
+})
+watch(deckScreen, (screen) => foxoe?.setScreen(screen), { flush: 'sync' })
 async function unlock() {
   if (!userId.value || !stationReachable.value || !station.value?.online) return
   await perform(async () => {
@@ -665,6 +833,17 @@ async function poll() {
   if (!disposed) timer = setTimeout(poll, 3000)
 }
 onMounted(() => {
+  foxoe = createFoxoeDeck()
+  foxoe.setScreen(deckScreen.value)
+  dialogObserver = new MutationObserver(() => {
+    otherDialog.value = hasOtherDialog()
+  })
+  dialogObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['open', 'aria-modal', 'role'],
+  })
   clockTimer = setInterval(() => {
     clock.value = performance.now()
   }, 1000)
@@ -675,6 +854,8 @@ onMounted(() => {
   document.addEventListener('keydown', touch)
 })
 onBeforeUnmount(() => {
+  dialogObserver?.disconnect()
+  foxoe?.dispose()
   disposed = true
   generation++
   clearTimeout(timer)
@@ -820,6 +1001,7 @@ function changePage(delta: number) {
           <article
             v-for="printer in station?.printers"
             :key="printer.local_id"
+            :id="`station-printer-${printer.local_id}`"
             class="station-printer"
             :class="{ expanded: expandedPrinter === printer.local_id }"
             :aria-label="printer.name"
@@ -1289,6 +1471,7 @@ function changePage(delta: number) {
           </div>
           <p v-if="error" class="alert danger" role="alert">{{ error }}</p>
           <PinEntry
+            ref="pinEntry"
             compact
             :key="`${userId}:${pinAttempt}`"
             v-model="pin"

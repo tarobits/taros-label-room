@@ -10,6 +10,7 @@
     "test:e2e": "playwright test",
     "test:i18n": "node --test tests/i18n.test.mjs",
     "test:license": "node --test tests/license.test.mjs",
+    "test:foxoe": "node --test tests/foxoe.test.mjs",
     "format": "prettier --write src tests *.ts *.json index.html",
     "format:check": "prettier --check src tests *.ts *.json index.html",
     "build:main": "vue-tsc --noEmit -p tsconfig.main.json && vite build",

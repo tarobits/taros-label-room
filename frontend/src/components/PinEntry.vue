@@ -38,6 +38,9 @@ function press(key: string) {
   const caret = key === 'clear' ? 0 : from + insertion.length
   field.setSelectionRange(caret, caret)
 }
+// External input uses the same selection, length limit, validation events and
+// shuffled digits as the touch keypad. The PIN itself is deliberately not exposed.
+defineExpose({ press, digits })
 </script>
 
 <template>
