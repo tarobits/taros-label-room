@@ -2,6 +2,19 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-pre3] - 2026-11-23
+
+### Changed
+
+- Companion Stream Deck actions now use dedicated Heroicons for users, locking,
+  navigation, pause/resume, stopping and emergency stopping. Action labels use
+  smaller text to fit beneath their icons.
+- PIN digits are larger and icon-free, including when the keypad shuffles.
+
+**FoxOE compatibility:** Update FoxOE to a version supporting its Heroicons
+catalog, nullable button icons and text-size controls before using this
+prerelease's Stream Deck integration. Older FoxOE versions reject these layouts.
+
 ## [0.23.0-pre2] - 2026-11-23
 
 ### Added
