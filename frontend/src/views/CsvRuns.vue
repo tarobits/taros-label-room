@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { previewAspect } from '../printing/labelPreview'
 import { t } from '../shared/i18n'
 import { confirmAction } from '../shared/confirmation'
 import { computed, onUnmounted, ref, watch } from 'vue'
@@ -758,7 +759,7 @@ onUnmounted(() => {
           :src="pixels ? preview.png : preview.design_png"
           :style="{
             imageRendering: pixels ? 'pixelated' : 'auto',
-            aspectRatio: `${preview.length_mm} / ${preview.width_mm}`,
+            aspectRatio: previewAspect(preview),
           }"
           :alt="$t('csvRuns.csvLabelPreview')"
         />

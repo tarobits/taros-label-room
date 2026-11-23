@@ -27,7 +27,7 @@ import TemplatePicker from '../components/TemplatePicker.vue'
 import TapeProfilePicker from '../components/TapeProfilePicker.vue'
 import { rememberTemplate } from '../templates/templateBrowser'
 import type { Template } from '../shared/types'
-import { decodeLabel } from '../printing/labelPreview'
+import { decodeLabel, previewAspect } from '../printing/labelPreview'
 import { templateLength } from '../templates/templateDimensions'
 import { compatibleProfile } from '../printing/media'
 const w = useWorkspaceStore()
@@ -573,8 +573,8 @@ async function submit() {
           :src="showPrintPixels ? preview.png : preview.design_png"
           :style="{
             imageRendering: showPrintPixels ? 'pixelated' : 'auto',
-            aspectRatio: `${preview.length_mm} / ${preview.width_mm}`,
-            '--label-aspect': preview.length_mm / preview.width_mm,
+            aspectRatio: previewAspect(preview),
+            '--label-aspect': previewAspect(preview),
           }"
           :alt="$t('newLabel.renderedLabelPreview')"
         />

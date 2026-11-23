@@ -970,7 +970,8 @@ def revision_preview(
         ),
         "width_mm": output.document.width_mm,
         "length_mm": output.document.length_mm,
-        "warnings": output.warnings,
+        "orientation": output.document.orientation,
+        "warnings": translate(output.warnings, request_language(request)),
         "missing_assets": output.missing_assets,
     }
 
@@ -1210,11 +1211,12 @@ def preview_record(body: PreviewInput, request: Request, session: Session) -> di
         "svg": output.editor_svg() if body.embed_fonts else output.svg,
         "pixel_width": output.image.width,
         "pixel_height": output.image.height,
-        "warnings": output.warnings,
+        "warnings": translate(output.warnings, request_language(request)),
         "missing_assets": output.missing_assets,
         "printable": not output.missing_assets,
         "length_mm": output.document.length_mm,
         "width_mm": output.document.width_mm,
+        "orientation": output.document.orientation,
         "resolved_elements": [e.model_dump() for e in output.document.elements],
     }
 

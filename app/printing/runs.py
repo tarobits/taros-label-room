@@ -16,7 +16,7 @@ from app.audit.print_audit import delegated_attribution, direct_attribution
 from app.authn.access import Action, Resource, access_context
 from app.authn.authorization import rendering_destination, require_record, visible_runs
 from app.http import db, get, job_record
-from app.i18n import Message, error_detail, request_language, translate
+from app.i18n import Language, Message, error_detail, render_descriptor, request_language, translate
 from app.models import LabelCopy, LabelTemplate, PrintJob, PrintRun, TapeProfile, User
 from app.printer.base import LabelGeometry, RenderedLabel
 from app.printing.destinations import members
@@ -113,7 +113,15 @@ def inspect_csv(body: CsvInput) -> dict[str, Any]:
     return parse_csv(body)
 
 
-def run_record(run: PrintRun) -> dict[str, Any]:
+def recorded_warnings(snapshot: dict[str, Any], language: Language) -> list[str]:
+    translations = snapshot.get("warning_translations", {})
+    return [
+        render_descriptor(translations[warning], language) if warning in translations else warning
+        for warning in snapshot.get("warnings", [])
+    ]
+
+
+def run_record(run: PrintRun, language: Language = "en") -> dict[str, Any]:
     return {
         "id": run.id,
         "name": run.name,
@@ -142,7 +150,7 @@ def run_record(run: PrintRun) -> dict[str, Any]:
             dict.fromkeys(
                 warning
                 for row in run.manifest["rows"]
-                for warning in row["template_snapshot"].get("warnings", [])
+                for warning in recorded_warnings(row["template_snapshot"], language)
             )
         ),
         "label_length_mm": sum(row["copies"] * row["length_mm"] for row in run.manifest["rows"]),
@@ -168,7 +176,7 @@ def quoted_run(run: PrintRun, request: Request, session: Session) -> dict[str, A
                 for copy in range(row["copies"])
             )
         cost = estimate_cost(request, session, run.destination_id, run.profile_id, labels)
-    return {**run_record(run), "cost_estimate": cost}
+    return {**run_record(run, request_language(request)), "cost_estimate": cost}
 
 
 @router.post("/runs/prepare")
@@ -373,7 +381,7 @@ def list_runs(
     request: Request, session: Session = Depends(db, scope="function")
 ) -> list[dict[str, Any]]:
     query = visible_runs(request, session, select(PrintRun).order_by(PrintRun.created_at.desc()))
-    return [run_record(run) for run in session.scalars(query.limit(100))]
+    return [run_record(run, request_language(request)) for run in session.scalars(query.limit(100))]
 
 
 @router.get("/runs/{identifier}")
@@ -409,9 +417,17 @@ def preview_run_row(
         "design_png": output.preview(
             run.manifest["foreground"], run.manifest["background"], smooth=True
         ),
-        "warnings": list(dict.fromkeys([*snapshot.get("warnings", []), *output.warnings])),
+        "warnings": list(
+            dict.fromkeys(
+                [
+                    *recorded_warnings(snapshot, request_language(request)),
+                    *translate(output.warnings, request_language(request)),
+                ]
+            )
+        ),
         "length_mm": row["length_mm"],
         "width_mm": row["width_mm"],
+        "orientation": output.document.orientation,
     }
 
 
@@ -501,7 +517,7 @@ def submit_run(
         run.submitted_at = stamp
         session.flush()
     return {
-        "run": run_record(run),
+        "run": run_record(run, request_language(request)),
         "jobs": [
             job_record(session, job)
             for job in session.scalars(

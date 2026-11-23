@@ -66,6 +66,7 @@ const document = ref<TemplateDocument>(newDocument()),
   name = ref(t('uiMessages.untitledLabel')),
   id = ref<string | null>(null),
   revision = ref(0)
+const verticalCanvas = computed(() => document.value.orientation === 'vertical')
 const scope = ref<'personal' | 'group' | 'global'>('personal'),
   groupId = ref<string | null>(null)
 const revisionHistoryOpen = ref(false)
@@ -80,7 +81,7 @@ function showRevisionHistory(event: MouseEvent) {
 }
 function applyRestoredRevision(template: Template) {
   name.value = template.name
-  document.value = structuredClone(template.document)
+  document.value = { orientation: 'horizontal', ...structuredClone(template.document) }
   revision.value = template.revision
   scope.value = template.scope ?? scope.value
   groupId.value = template.group_id ?? null
@@ -167,22 +168,24 @@ const sampleProfile = computed({
     document.value.width_mm = profile.width_mm
     if (widthChanged) {
       const nextBand = printableBand.value
+      const axis = verticalCanvas.value ? 'x' : 'y'
+      const dimension = verticalCanvas.value ? 'width' : 'height'
       for (const element of document.value.elements) {
         // Explicit layout constraints remain authoritative.
         if (
-          element.distance_holder?.axis === 'vertical' ||
+          element.distance_holder?.axis === (verticalCanvas.value ? 'horizontal' : 'vertical') ||
           document.value.logic?.bindings.some(
-            (binding) => binding.target === element.id && binding.property === 'y',
+            (binding) => binding.target === element.id && binding.property === axis,
           )
         )
           continue
         const geometry = elementGeometry(positionedElement(element))
-        const space = previousBand.height - geometry.height
+        const space = previousBand.height - geometry[dimension]
         // A full-height item has no free travel; treat it as centered.
-        const position = Math.abs(space) < 1e-9 ? 0.5 : (geometry.y - previousBand.top) / space
-        const y = nextBand.top + position * (nextBand.height - geometry.height)
+        const position = Math.abs(space) < 1e-9 ? 0.5 : (geometry[axis] - previousBand.top) / space
+        const next = nextBand.top + position * (nextBand.height - geometry[dimension])
         // Translate only: preserve stored dimensions, rotation, and automatic sizing.
-        element.y += y - geometry.y
+        element[axis] += next - geometry[axis]
       }
     }
     document.value.media = mediaProperties(profile)
@@ -339,6 +342,18 @@ const canvasLength = computed(() =>
     ? (preview.value?.length_mm ?? document.value.length_mm)
     : document.value.length_mm,
 )
+const canvasWidth = computed(() =>
+  verticalCanvas.value ? document.value.width_mm : canvasLength.value,
+)
+const canvasHeight = computed(() =>
+  verticalCanvas.value ? canvasLength.value : document.value.width_mm,
+)
+const printableArea = computed(() => ({
+  x: verticalCanvas.value ? verticalMargin.value : margin.value,
+  y: verticalCanvas.value ? margin.value : verticalMargin.value,
+  width: verticalCanvas.value ? printableBand.value.height : canvasLength.value - margin.value * 2,
+  height: verticalCanvas.value ? canvasLength.value - margin.value * 2 : printableBand.value.height,
+}))
 const canvasElements = computed(() =>
   document.value.elements
     .map((element) => {
@@ -522,7 +537,11 @@ async function load() {
         userGroups.value.push({ id: groupId.value, name: t('uiMessages.currentTemplateGroup') })
       editable.value =
         template.can_edit ?? (!!auth.user?.is_admin || template.owner_id === auth.user?.id)
-      document.value = { print_resolution: 'printer', ...structuredClone(template.document) }
+      document.value = {
+        orientation: 'horizontal',
+        print_resolution: 'printer',
+        ...structuredClone(template.document),
+      }
     } else {
       id.value = null
       revision.value = 0
@@ -604,6 +623,11 @@ function schedulePreview() {
 watch([document, previewData, sampleProfile, () => w.selectedPrinter], schedulePreview, {
   deep: true,
 })
+watch(verticalCanvas, () => {
+  interruptDrag()
+  preview.value = null
+  localArtwork.value = false
+})
 watch(
   () => route.params.id,
   (identifier) => {
@@ -629,18 +653,24 @@ watch(
 function add(kind: Element['kind'], vertical = false) {
   const element = newElement(kind)
   if (document.value.version === 2) element.logic_name = nextElementName(document.value, kind)
-  element.x = margin.value
-  element.y = verticalMargin.value
-  element.width = Math.min(element.width, document.value.length_mm - 2 * margin.value)
-  element.height = Math.min(element.height, printableBand.value.height)
-  if (kind === 'qr') element.width = element.height
+  element.x = printableArea.value.x
+  element.y = printableArea.value.y
+  const availableWidth = verticalCanvas.value
+    ? printableBand.value.height
+    : document.value.length_mm - 2 * margin.value
+  const availableHeight = verticalCanvas.value
+    ? document.value.length_mm - 2 * margin.value
+    : printableBand.value.height
+  element.width = Math.min(element.width, availableWidth)
+  element.height = Math.min(element.height, availableHeight)
+  if (kind === 'qr') element.width = element.height = Math.min(element.width, element.height)
   if (kind === 'line' && vertical) {
     element.rotation = 90
     setElementGeometry(element, {
-      x: margin.value,
-      y: verticalMargin.value,
+      x: printableArea.value.x,
+      y: printableArea.value.y,
       width: element.stroke,
-      height: Math.min(30, printableBand.value.height),
+      height: Math.min(30, availableHeight),
     })
   }
   document.value.elements.push(element)
@@ -702,14 +732,14 @@ function align(axis: 'left' | 'center' | 'right' | 'middle') {
   const e = selected.value
   const geometry = elementGeometry(positionedElement(e))
   if (axis === 'middle' && !positionLocked('y'))
-    geometry.y = (document.value.width_mm - geometry.height) / 2
+    geometry.y = (canvasHeight.value - geometry.height) / 2
   else if (axis !== 'middle' && !positionLocked('x'))
     geometry.x =
       axis === 'left'
-        ? margin.value
+        ? printableArea.value.x
         : axis === 'right'
-          ? canvasLength.value - margin.value - geometry.width
-          : (canvasLength.value - geometry.width) / 2
+          ? printableArea.value.x + printableArea.value.width - geometry.width
+          : (canvasWidth.value - geometry.width) / 2
   setElementGeometry(e, geometry)
   record()
 }
@@ -737,7 +767,7 @@ function move(event: PointerEvent) {
   if (drag && event.pointerId !== drag.pointerId) return
   const p = point(event)
   pointer.value =
-    p.x >= 0 && p.x <= canvasLength.value && p.y >= 0 && p.y <= document.value.width_mm ? p : null
+    p.x >= 0 && p.x <= canvasWidth.value && p.y >= 0 && p.y <= canvasHeight.value ? p : null
   if (!drag || !selected.value || selected.value.id !== drag.element.id) return
   const dx = p.x - drag.x,
     dy = p.y - drag.y
@@ -779,7 +809,7 @@ function move(event: PointerEvent) {
     if (!positionLocked('x'))
       selected.value.x = Math.max(-1000, drag.element.x + ((cos - 1) * dw - sin * dh) / 2)
     if (!positionLocked('y'))
-      selected.value.y = Math.max(-100, drag.element.y + (sin * dw + (cos - 1) * dh) / 2)
+      selected.value.y = Math.max(-1000, drag.element.y + (sin * dw + (cos - 1) * dh) / 2)
   }
 }
 function finish(event?: PointerEvent) {
@@ -975,7 +1005,7 @@ function key(event: KeyboardEvent) {
       selected.value.x = Math.max(-1000, selected.value.x - delta)
     if (event.key === 'ArrowRight' && !positionLocked('x')) selected.value.x += delta
     if (event.key === 'ArrowUp' && !positionLocked('y'))
-      selected.value.y = Math.max(-100, selected.value.y - delta)
+      selected.value.y = Math.max(-1000, selected.value.y - delta)
     if (event.key === 'ArrowDown' && !positionLocked('y')) selected.value.y += delta
     record()
   }
@@ -1181,6 +1211,13 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="template-sharing field-row">
+      <label>
+        {{ $t('templateEditor.orientation') }}
+        <select v-model="document.orientation" :disabled="!editable" @change="record">
+          <option value="horizontal">{{ $t('templateEditor.horizontal') }}</option>
+          <option value="vertical">{{ $t('common.vertical') }}</option>
+        </select>
+      </label>
       <div v-if="w.destinations.length > 1" class="setting-field">
         <SettingHelp
           :help="editorHelp.destination"
@@ -1406,7 +1443,7 @@ onUnmounted(() => {
             <div class="ruler-corner">{{ $t('common.mm') }}</div>
             <EditorRuler
               :selection-key="selectedId"
-              :length="canvasLength"
+              :length="canvasWidth"
               :scale="scale"
               :position="pointer?.x ?? null"
               :selection="
@@ -1418,7 +1455,7 @@ onUnmounted(() => {
             <EditorRuler
               :selection-key="selectedId"
               vertical
-              :length="document.width_mm"
+              :length="canvasHeight"
               :scale="scale"
               :position="pointer?.y ?? null"
               :selection="
@@ -1433,9 +1470,9 @@ onUnmounted(() => {
               tabindex="0"
               role="img"
               :aria-label="$t('templateEditor.labelDesignCanvas')"
-              :width="canvasLength * scale"
-              :height="document.width_mm * scale"
-              :viewBox="`0 0 ${canvasLength} ${document.width_mm}`"
+              :width="canvasWidth * scale"
+              :height="canvasHeight * scale"
+              :viewBox="`0 0 ${canvasWidth} ${canvasHeight}`"
               @pointermove="move"
               @pointerup="finish"
               @pointercancel="finish"
@@ -1472,10 +1509,10 @@ onUnmounted(() => {
               />
               <rect
                 class="printable-border"
-                :x="margin"
-                :y="verticalMargin"
-                :width="canvasLength - margin * 2"
-                :height="printableBand.height"
+                :x="printableArea.x"
+                :y="printableArea.y"
+                :width="printableArea.width"
+                :height="printableArea.height"
                 fill="none"
                 :stroke="printableBorder"
                 stroke-width="1.25"
@@ -1537,8 +1574,8 @@ onUnmounted(() => {
                 />
               </g>
               <g v-if="pointer" class="canvas-cursor-guides" pointer-events="none">
-                <line :x1="pointer.x" :x2="pointer.x" y1="0" :y2="document.width_mm" />
-                <line x1="0" :x2="canvasLength" :y1="pointer.y" :y2="pointer.y" />
+                <line :x1="pointer.x" :x2="pointer.x" y1="0" :y2="canvasHeight" />
+                <line x1="0" :x2="canvasWidth" :y1="pointer.y" :y2="pointer.y" />
               </g>
             </svg>
           </div>
@@ -1558,7 +1595,7 @@ onUnmounted(() => {
         {{ $t('common.mm') }}
       </p>
       <p class="help">
-        {{ canvasLength }} × {{ document.width_mm }} {{ $t('common.mm2') }} {{ margin }}
+        {{ canvasWidth }} × {{ canvasHeight }} {{ $t('common.mm2') }} {{ margin }}
         {{ $t('common.mmEnd') }} {{ printableBand.height.toFixed(2) }}
         {{ $t('common.mmPrintableWidth') }}
         {{
@@ -2038,7 +2075,7 @@ onUnmounted(() => {
                   :disabled="positionLocked('y')"
                   @input="setPosition('y', $event)"
                   type="number"
-                  min="-100"
+                  min="-1000"
                   step="0.5"
                   @change="record"
               /></label>

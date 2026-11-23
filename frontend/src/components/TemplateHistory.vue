@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from '../shared/i18n'
+import { previewAspect } from '../printing/labelPreview'
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { useAuthStore } from '../auth/auth'
 import { api, errorMessage } from '../shared/api'
@@ -31,6 +32,7 @@ const historyError = ref('')
 const previewError = ref('')
 const restoreError = ref('')
 interface RevisionPreview {
+  orientation?: 'horizontal' | 'vertical'
   png: string
   width_mm: number
   length_mm: number
@@ -250,7 +252,7 @@ onBeforeUnmount(() => {
               class="motion-reveal"
               :src="preview.png"
               :alt="$t('uiDetails.revisionPreview', { value1: String(selected.revision) })"
-              :style="{ aspectRatio: `${preview.length_mm} / ${preview.width_mm}` }"
+              :style="{ aspectRatio: previewAspect(preview) }"
             />
             <p v-else-if="previewLoading" role="status">{{ $t('common.loadingPreview') }}</p>
             <div v-else-if="previewError" class="alert warning" role="alert">

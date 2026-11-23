@@ -94,6 +94,7 @@ export interface Element {
   qr_margin_mm?: number | null
   barcode_format?: 'code128' | 'ean13' | 'ean8' | 'code39'
   barcode_caption?: boolean
+  barcode_quiet_zone_in_box?: boolean
 }
 export interface PreviewExample {
   id: string
@@ -101,6 +102,7 @@ export interface PreviewExample {
   data: Record<string, VariableValue>
 }
 export interface TemplateDocument {
+  orientation?: 'horizontal' | 'vertical'
   preview_examples?: PreviewExample[]
   media?: import('../printing/media').MediaProperties
   version: 1 | 2
@@ -116,6 +118,7 @@ export interface TemplateDocument {
   fields: TemplateField[]
 }
 export interface Preview {
+  orientation?: 'horizontal' | 'vertical'
   cost_estimate?: CostEstimate | null
   print_plan?: PrintPlan | null
   printable?: boolean
@@ -162,6 +165,7 @@ export function automaticDimension(element: Element): 'width' | 'height' | undef
 export function newDocument(): TemplateDocument {
   return {
     version: 1,
+    orientation: 'horizontal',
     width_mm: 24,
     length_mm: 60,
     auto_length: true,
@@ -221,6 +225,7 @@ export function newElement(kind: Element['kind']): Element {
     qr_fill_box: false,
     barcode_format: 'code128',
     barcode_caption: true,
+    barcode_quiet_zone_in_box: false,
     qr_margin_mm: 1,
   }
 }

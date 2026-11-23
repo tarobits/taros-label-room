@@ -173,6 +173,11 @@ def build_job(
             "document": document,
             "render_spec": asdict(spec),
             "warnings": output.warnings,
+            "warning_translations": {
+                str(warning): warning.descriptor()
+                for warning in output.warnings
+                if isinstance(warning, Message)
+            },
             "template_padding_mm": output.template_padding_mm,
         },
         payload=body.model_copy(update={"data": output.resolved_inputs}).model_dump(mode="json")[

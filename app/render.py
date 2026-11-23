@@ -5,7 +5,7 @@ import io
 import math
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from html import escape
 from pathlib import Path
@@ -83,7 +83,9 @@ class RenderOutput:
                 family = font["name"].getBestFamilyName()
                 if family is None:
                     continue
-                weight = int(getattr(font["OS/2"], "usWeightClass")) if family == "Noto Sans" else 400
+                weight = (
+                    int(getattr(font["OS/2"], "usWeightClass")) if family == "Noto Sans" else 400
+                )
                 text = text_by_face.get((family, weight))
                 if not text:
                     continue
@@ -96,7 +98,7 @@ class RenderOutput:
                 # Families are renderer-owned aliases, never user-provided CSS.
                 rules.append(
                     f'@font-face{{font-family:"{family}";font-weight:{weight};'
-                    f'src:url(data:font/ttf;base64,{encoded})}}'
+                    f"src:url(data:font/ttf;base64,{encoded})}}"
                 )
         if not rules:
             return self.svg
@@ -385,27 +387,55 @@ def matrix_svg(element: Element, content: str, spec: RenderSpec) -> str:
     return f'<path d="{cells}" fill="black"/>'
 
 
-def barcode_svg(element: Element, content: str, spec: RenderSpec, fonts: FontStore | None) -> str:
+@dataclass(frozen=True)
+class BarcodeLayout:
+    pattern: str
+    caption: str
+    module: float
+    offset: float
+    height: float
+    quiet_mm: float
+
+
+def barcode_layout(element: Element, content: str, spec: RenderSpec) -> BarcodeLayout:
     pattern, caption = encode_barcode(element.barcode_format, content)
-    # Keep quiet zones inside the element box. Use whole printer pixels per
-    # module, with the horizontal physical axis following element rotation.
+    # Old snapshots retain integer-pixel modules and internal quiet zones.
+    # New boxes describe only the bars, with clear space checked separately.
     dpi = spec.dpi if element.rotation % 180 else spec.horizontal_dpi
     quiet = 11 if element.barcode_format.startswith("ean") else 10
-    pixels = math.floor(element.width * dpi / 25.4 / (len(pattern) + quiet * 2))
-    if pixels < 2:
+    pixels: float
+    if element.barcode_quiet_zone_in_box:
+        pixels = math.floor(element.width * dpi / 25.4 / (len(pattern) + quiet * 2))
+        module = pixels * 25.4 / dpi
+        offset = (element.width - len(pattern) * module) / 2
+    else:
+        module = element.width / len(pattern)
+        pixels = module * dpi / 25.4
+        offset = 0
+    if pixels < 2 - 1e-9:
         raise ValueError(
             Message(
                 "domainMessages.barcodeIsTooNarrowWidenItOrShortenItsContentMinimum2PixelsPerModule"
             )
         )
-    module = pixels * 25.4 / dpi
-    offset = (element.width - len(pattern) * module) / 2
     caption_height = element.font_size + 1 if element.barcode_caption else 0
     height = element.height - caption_height
     if height < 3:
         raise ValueError(
             Message("domainMessages.barcodeIsTooShortAllowAtLeast3MmForBarsPlusSpaceForItsCaption")
         )
+    return BarcodeLayout(pattern, caption, module, offset, height, quiet * module)
+
+
+def barcode_svg(element: Element, content: str, spec: RenderSpec, fonts: FontStore | None) -> str:
+    layout = barcode_layout(element, content, spec)
+    pattern, caption, module, offset, height = (
+        layout.pattern,
+        layout.caption,
+        layout.module,
+        layout.offset,
+        layout.height,
+    )
     bars = "".join(
         f"M{offset + i * module},0h{module}v{height}h{-module}z"
         for i, bit in enumerate(pattern)
@@ -427,6 +457,56 @@ def barcode_svg(element: Element, content: str, spec: RenderSpec, fonts: FontSto
         )
         body += f'<g transform="translate(0,{height + 1})">{text_svg(text, caption, fonts)}</g>'
     return body
+
+
+def barcode_quiet_regions(
+    element: Element, layout: BarcodeLayout
+) -> list[tuple[float, float, float, float]]:
+    """Rotate the two clear strips into the canvas axes, excluding the caption."""
+    start = layout.offset
+    end = start + len(layout.pattern) * layout.module
+    cos, sin = (
+        round(math.cos(math.radians(element.rotation))),
+        round(math.sin(math.radians(element.rotation))),
+    )
+    cx, cy = element.width / 2, element.height / 2
+    regions = []
+    for left, right in ((start - layout.quiet_mm, start), (end, end + layout.quiet_mm)):
+        corners = [
+            (
+                element.x + cx + cos * (x - cx) - sin * (y - cy),
+                element.y + cy + sin * (x - cx) + cos * (y - cy),
+            )
+            for x in (left, right)
+            for y in (0, layout.height)
+        ]
+        regions.append(
+            (
+                min(x for x, _ in corners),
+                min(y for _, y in corners),
+                max(x for x, _ in corners),
+                max(y for _, y in corners),
+            )
+        )
+    return regions
+
+
+def quiet_region_obstructed(
+    image: Image.Image, region: tuple[float, ...], width_mm: float, height_mm: float
+) -> bool:
+    left, top, right, bottom = region
+    if left < -1e-6 or top < -1e-6 or right > width_mm + 1e-6 or bottom > height_mm + 1e-6:
+        return True
+    sx, sy = image.width / width_mm, image.height / height_mm
+    # Inspect pixels whose centers lie inside the quiet zone. Do not include
+    # adjacent bars just because their edge shares a fractional device pixel.
+    box = (
+        max(0, math.ceil(left * sx - 0.5 + 1e-6)),
+        max(0, math.ceil(top * sy - 0.5 + 1e-6)),
+        min(image.width, math.ceil(right * sx - 0.5 - 1e-6)),
+        min(image.height, math.ceil(bottom * sy - 0.5 - 1e-6)),
+    )
+    return box[2] > box[0] and box[3] > box[1] and image.crop(box).getextrema()[0] == 0
 
 
 def qr_svg(element: Element, content: str, spec: RenderSpec) -> str:
@@ -543,7 +623,7 @@ def resolve_layout(
                 element.x += right + gap - left
             else:
                 element.y += bottom + gap - top
-            if not -1000 <= element.x <= 1000 or not -100 <= element.y <= 100:
+            if not -1000 <= element.x <= 1000 or not -1000 <= element.y <= 1000:
                 raise ValueError(
                     Message(
                         "domainMessages.distanceHolderPlacesAnElementBeyondSupportedCoordinates"
@@ -572,9 +652,11 @@ def resolve_layout(
 
 
 def fitted_length(document: TemplateDocument, margin_mm: float) -> float:
+    edge = 3 if document.orientation == "vertical" else 2
     return max(
         0,
-        max((element_bounds(e)[2] for e in document.elements if e.visible), default=0) + margin_mm,
+        max((element_bounds(e)[edge] for e in document.elements if e.visible), default=0)
+        + margin_mm,
     )
 
 
@@ -776,17 +858,28 @@ def render_document(
             }
         )
     )
-    px_width = round(document.length_mm * spec.horizontal_dpi / 25.4)
-    px_height = round(document.width_mm * spec.dpi / 25.4)
+    vertical = document.orientation == "vertical"
+    canvas_width, canvas_height = document.canvas_width_mm, document.canvas_height_mm
+    # Geometry remains in the author's canvas axes. Swap raster density for
+    # portrait previews; only render_job rotates into the physical tape axes.
+    canvas_spec = replace(spec, dpi=spec.horizontal_dpi, dpi_x=spec.dpi) if vertical else spec
+    px_width = round(canvas_width * canvas_spec.horizontal_dpi / 25.4)
+    px_height = round(canvas_height * canvas_spec.dpi / 25.4)
+    left, top, right, bottom = (
+        (printable_top, spec.margin_mm, printable_bottom, document.length_mm - spec.margin_mm)
+        if vertical
+        else (spec.margin_mm, printable_top, document.length_mm - spec.margin_mm, printable_bottom)
+    )
     aspect = (
         ' preserveAspectRatio="none"'
         if spec.stretch_canvas or spec.horizontal_dpi != spec.dpi
         else ""
     )
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px_width}" height="{px_height}" viewBox="0 0 {document.length_mm} {document.width_mm}"{aspect}><rect width="100%" height="100%" fill="white"/>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px_width}" height="{px_height}" viewBox="0 0 {canvas_width} {canvas_height}"{aspect}><rect width="100%" height="100%" fill="white"/>'
     ]
     qr_boxes: list[tuple[float, float, float, float, str]] = []
+    barcode_checks: list[tuple[Element, BarcodeLayout]] = []
     boxes: list[tuple[float, float, float, float, str]] = []
     warnings: list[str] = [
         f"Missing {kind} in element {identifier}. Restore or replace it before printing."
@@ -796,20 +889,20 @@ def render_document(
     clipping = document.out_of_bounds == "clip"
     if clipping:
         parts.append(
-            f'<defs><clipPath id="printable"><rect x="{spec.margin_mm}" y="{printable_top}" '
-            f'width="{document.length_mm - 2 * spec.margin_mm}" '
-            f'height="{printable_bottom - printable_top}"/></clipPath></defs>'
+            f'<defs><clipPath id="printable"><rect x="{left}" y="{top}" '
+            f'width="{right - left}" '
+            f'height="{bottom - top}"/></clipPath></defs>'
             '<g clip-path="url(#printable)">'
         )
     for element in document.elements:
         if not element.visible:
             continue
-        x, y, right, bottom = element_bounds(element)
+        x, y, element_right, element_bottom = element_bounds(element)
         outside = (
-            x < spec.margin_mm - 0.001
-            or y < printable_top - 0.001
-            or right > document.length_mm - spec.margin_mm + 0.001
-            or bottom > printable_bottom + 0.001
+            x < left - 0.001
+            or y < top - 0.001
+            or element_right > right + 0.001
+            or element_bottom > bottom + 0.001
         )
         if outside:
             if not clipping:
@@ -820,7 +913,7 @@ def render_document(
                         value2=spec.margin_mm,
                     )
                 )
-        box = (x, y, right, bottom, element.id)
+        box = (x, y, element_right, element_bottom, element.id)
         boxes.append(box)
         content = (
             element.content
@@ -833,15 +926,16 @@ def render_document(
             body = text_svg(element, content, fonts)
         elif element.kind == "qr":
             qr_boxes.append(box)
-            body = qr_svg(element, content, spec)
+            body = qr_svg(element, content, canvas_spec)
         elif element.kind == "barcode":
             qr_boxes.append(box)
-            body = barcode_svg(element, content, spec, fonts)
+            body = barcode_svg(element, content, canvas_spec, fonts)
+            barcode_checks.append((element, barcode_layout(element, content, canvas_spec)))
         elif element.kind in ("datamatrix", "aztec"):
             qr_boxes.append(box)
-            body = matrix_svg(element, content, spec)
+            body = matrix_svg(element, content, canvas_spec)
         elif element.kind == "image":
-            body = image_svg(element, images, spec.horizontal_dpi, spec.dpi)
+            body = image_svg(element, images, canvas_spec.horizontal_dpi, canvas_spec.dpi)
         elif element.kind == "rectangle":
             inset = element.stroke / 2
             body = f'<rect x="{inset}" y="{inset}" width="{element.width - element.stroke}" height="{element.height - element.stroke}" stroke="black" stroke-width="{element.stroke}" fill="{"black" if element.filled else "none"}"/>'
@@ -851,27 +945,27 @@ def render_document(
         if outside and clipping:
             # QR quiet zones are meaningful even where they contain no ink.
             visible = (
-                (x, y, right, bottom)
+                (x, y, element_right, element_bottom)
                 if element.kind in ("qr", "barcode", "datamatrix", "aztec")
                 else artwork_bounds(
                     artwork,
-                    (x, y, right, bottom),
-                    px_width / document.length_mm,
-                    px_height / document.width_mm,
+                    (x, y, element_right, element_bottom),
+                    px_width / canvas_width,
+                    px_height / canvas_height,
                     font_files,
                 )
             )
             if visible and (
-                visible[0] < spec.margin_mm - 0.001
-                or visible[1] < printable_top - 0.001
-                or visible[2] > document.length_mm - spec.margin_mm + 0.001
-                or visible[3] > printable_bottom + 0.001
+                visible[0] < left - 0.001
+                or visible[1] < top - 0.001
+                or visible[2] > right + 0.001
+                or visible[3] > bottom + 0.001
             ):
                 omitted = (
-                    visible[2] < spec.margin_mm
-                    or visible[3] < printable_top
-                    or visible[0] > document.length_mm - spec.margin_mm
-                    or visible[1] > printable_bottom
+                    visible[2] < left
+                    or visible[3] < top
+                    or visible[0] > right
+                    or visible[1] > bottom
                 )
                 warnings.append(
                     f"Element {element.id} is {'omitted' if omitted else 'clipped'} at the printable area."
@@ -908,6 +1002,18 @@ def render_document(
     )
     source = Image.open(io.BytesIO(png)).convert("L")
     image = source.point([255 if value >= 128 else 0 for value in range(256)], mode="1")
+    for element, layout in barcode_checks:
+        if any(
+            quiet_region_obstructed(image, region, canvas_width, canvas_height)
+            for region in barcode_quiet_regions(element, layout)
+        ):
+            warnings.append(
+                Message(
+                    "domainMessages.barcodeQuietZoneObstructed",
+                    name=element.name or str(document.elements.index(element) + 1),
+                    margin=round(layout.quiet_mm, 2),
+                )
+            )
     return RenderOutput(
         svg,
         image,
@@ -944,6 +1050,8 @@ def render_job(
     )
     # Public raster contract: a set bit means ink; Pillow uses a set bit for white.
     ink = ImageOps.invert(output.image.convert("L")).convert("1")
+    if output.document.orientation == "vertical":
+        ink = ink.transpose(Image.Transpose.ROTATE_270)
     return RenderedLabel(
         copy.id,
         job.width_mm,

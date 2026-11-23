@@ -2354,6 +2354,7 @@
     "repaymentsCorrections": "Rückzahlungen und Korrekturen"
   },
   "templateEditor": {
+    "orientation": "Ausrichtung",
     "addAztecCode": "Aztec-Code hinzufügen",
     "addDataMatrix": "Data-Matrix-Code hinzufügen",
     "addQrCode": "QR-Code hinzufügen",
@@ -3242,6 +3243,7 @@
     "textContainsCharactersUnsupportedByTheSelectedFont": "Der Text enthält Zeichen, die von der gewählten Schriftart nicht unterstützt werden",
     "matrixCodeIsTooSmallEnlargeItOrShortenItsContentMinimum2PixelsPerModule": "Der Matrixcode ist zu klein: vergrößere ihn oder kürze seinen Inhalt (mindestens 2 Pixel pro Modul)",
     "barcodeIsTooNarrowWidenItOrShortenItsContentMinimum2PixelsPerModule": "Der Barcode ist zu schmal: verbreitere ihn oder kürze seinen Inhalt (mindestens 2 Pixel pro Modul)",
+    "barcodeQuietZoneObstructed": "Barcode {name}: Die Ruhezonen sind belegt oder ragen über das Etikett hinaus. Halte auf beiden Seiten der Balken {margin} mm frei.",
     "barcodeIsTooShortAllowAtLeast3MmForBarsPlusSpaceForItsCaption": "Der Barcode ist zu niedrig: plane mindestens 3 mm für die Balken und Platz für die Beschriftung ein",
     "qrContentCannotBeEmpty": "Der QR-Inhalt darf nicht leer sein",
     "qrContentExceeds1000Bytes": "Der QR-Inhalt überschreitet 1000 Bytes",

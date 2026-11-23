@@ -58,9 +58,9 @@ class Element(Input):
     kind: Literal["text", "qr", "barcode", "datamatrix", "aztec", "rectangle", "line", "image"]
     # The unrotated origin may be negative while the rotated bounds are inside the label.
     x: float = Field(ge=-1000, le=1000)
-    y: float = Field(ge=-100, le=100)
+    y: float = Field(ge=-1000, le=1000)
     width: float = Field(gt=0, le=1000)
-    height: float = Field(gt=0, le=100)
+    height: float = Field(gt=0, le=1000)
     rotation: Literal[0, 90, 180, 270] = 0
     distance_holder: DistanceHolder | None = None
     content: str = Field(default="", max_length=2000)
@@ -92,6 +92,8 @@ class Element(Input):
     qr_margin_mm: float | None = Field(default=None, ge=0, le=50)
     barcode_format: Literal["code128", "ean13", "ean8", "code39"] = "code128"
     barcode_caption: bool = True
+    # Legacy documents include quiet zones in the box; new editor objects do not.
+    barcode_quiet_zone_in_box: bool = True
 
     @model_validator(mode="after")
     def legacy_image_box_lock(self) -> "Element":
@@ -124,6 +126,7 @@ class PreviewExample(Input):
 
 class TemplateDocument(Input):
     version: Literal[1, 2] = 1
+    orientation: Literal["horizontal", "vertical"] = "horizontal"
     width_mm: float = Field(default=24, gt=0, le=100)
     media: MediaProperties = Field(default_factory=MediaProperties)
     length_mm: float = Field(default=60, ge=10, le=300)
@@ -136,6 +139,14 @@ class TemplateDocument(Input):
     preview_examples: list[PreviewExample] = Field(default_factory=list, max_length=50)
     logic: Program | None = None
     logic_editor: LogicEditorState | None = None
+
+    @property
+    def canvas_width_mm(self) -> float:
+        return self.width_mm if self.orientation == "vertical" else self.length_mm
+
+    @property
+    def canvas_height_mm(self) -> float:
+        return self.length_mm if self.orientation == "vertical" else self.width_mm
 
     @model_validator(mode="after")
     def validate_document(self) -> "TemplateDocument":

@@ -2354,6 +2354,7 @@
     "repaymentsCorrections": "Repayments & corrections"
   },
   "templateEditor": {
+    "orientation": "Orientation",
     "addAztecCode": "Add Aztec code",
     "addDataMatrix": "Add Data Matrix",
     "addQrCode": "Add QR code",
@@ -3242,6 +3243,7 @@
     "textContainsCharactersUnsupportedByTheSelectedFont": "Text contains characters unsupported by the selected font",
     "matrixCodeIsTooSmallEnlargeItOrShortenItsContentMinimum2PixelsPerModule": "Matrix code is too small: enlarge it or shorten its content (minimum 2 pixels per module)",
     "barcodeIsTooNarrowWidenItOrShortenItsContentMinimum2PixelsPerModule": "Barcode is too narrow: widen it or shorten its content (minimum 2 pixels per module)",
+    "barcodeQuietZoneObstructed": "Barcode {name}: scanning margins are obstructed or extend beyond the label. Keep {margin} mm clear on both sides of the bars.",
     "barcodeIsTooShortAllowAtLeast3MmForBarsPlusSpaceForItsCaption": "Barcode is too short: allow at least 3 mm for bars plus space for its caption",
     "qrContentCannotBeEmpty": "QR content cannot be empty",
     "qrContentExceeds1000Bytes": "QR content exceeds 1000 bytes",

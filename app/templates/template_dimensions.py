@@ -37,21 +37,28 @@ def template_dimensions(
         and TOKEN.search(element.content)
     }
     dynamic_edges: dict[str, bool] = {}
+    vertical = document.orientation == "vertical"
+    length_axis = "vertical" if vertical else "horizontal"
 
     def right_edge_changes(identifier: str) -> bool:
         if identifier not in dynamic_edges:
             element = elements[identifier]
             holder = element.distance_holder
-            if holder and holder.axis == "horizontal":
-                # Horizontal holders pin the rotated left edge to the anchor's
-                # right edge. A quarter turn projects the fixed height onto X.
+            if holder and holder.axis == length_axis:
+                # A holder pins the start edge; only width projected onto the
+                # tape's length axis can then change the end edge.
                 changes = right_edge_changes(holder.element_id) or (
-                    identifier in dynamic_widths and element.rotation in (0, 180)
+                    identifier in dynamic_widths
+                    and (
+                        element.rotation in (90, 270) if vertical else element.rotation in (0, 180)
+                    )
                 )
             else:
                 # Rotation is around the box center: even a quarter turn shifts
                 # an unanchored box's right edge as its text width changes.
-                changes = identifier in dynamic_widths
+                changes = identifier in dynamic_widths and (
+                    not vertical or element.rotation in (90, 270)
+                )
             dynamic_edges[identifier] = changes
         return dynamic_edges[identifier]
 

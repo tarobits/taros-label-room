@@ -1,3 +1,13 @@
+export function previewAspect(preview: {
+  length_mm: number
+  width_mm: number
+  orientation?: 'horizontal' | 'vertical'
+}) {
+  return preview.orientation === 'vertical'
+    ? preview.width_mm / preview.length_mm
+    : preview.length_mm / preview.width_mm
+}
+
 // Decode both views before replacing the editor's last complete raster. Geometry
 // and artwork then update together, while pointer feedback stays synchronous.
 export async function decodeLabel(preview: { png: string; design_png: string }) {
