@@ -161,8 +161,10 @@ This integration uses dynamic layouts and needs no registration credential in
 the companion, no connection to FoxOE's network registration port, and no browser
 access to its loopback API. The FoxOE app entry and extension pairing are required.
 Queue selection, cartridge management and configuration remain on the touchscreen.
-The companion sends FoxOE's supported built-in icons alongside action labels;
-their appearance on physical keys depends on FoxOE's renderer.
+The companion uses Heroicons for actions, including lock, user, pause/resume,
+stop and emergency stop. PIN digits use large text-only keys (`icon: null`,
+`textSize: 32`). This requires FoxOE's Heroicons catalog, nullable button icons,
+and text-size support.
 
 ## Read-only status API for external displays
 

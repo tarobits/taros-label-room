@@ -3,7 +3,13 @@ import { resolve } from 'node:path'
 
 type Layout = {
   id: string
-  buttons: ({ id: string; label: string; disabled: boolean; icon: string } | null)[]
+  buttons: ({
+    id: string
+    label: string
+    disabled: boolean
+    icon: string | null
+    textSize?: number
+  } | null)[]
 }
 declare global {
   interface Window {
@@ -223,10 +229,41 @@ test('FoxOE unlocks through the shared shuffled PIN form, then exposes only perm
   await page.setViewportSize({ width: 1024, height: 600 })
   const state = await fixture(page)
   await ready(page, 'unlock')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'unlock')?.icon).toBe('lock-open')
   await press(page, 'unlock')
   await ready(page, 'user.0')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'user.0')?.icon).toBe('user')
   await press(page, 'user.0')
   await ready(page, 'digit.1')
+  const keypad = (await current(page))!.buttons.filter((button) => button !== null)
+  const digitKeys = keypad.filter((button) => button.id.startsWith('digit.'))
+  expect(digitKeys).toHaveLength(10)
+  expect(digitKeys.every((button) => button.icon === null)).toBe(true)
+  expect(digitKeys.every((button) => button.textSize === 32)).toBe(true)
+  expect(
+    keypad
+      .filter((button) => !button.id.startsWith('digit.'))
+      .every((button) => button.textSize === 10),
+  ).toBe(true)
+  expect(
+    Object.fromEntries(
+      keypad
+        .filter((button) => !button.id.startsWith('digit.'))
+        .map((button) => [button.id, button.icon]),
+    ),
+  ).toEqual({
+    backspace: 'backspace',
+    cancel: 'xmark',
+    confirm: 'check',
+    clear: 'trash',
+  })
+  await test.info().attach('foxoe-keypad.json', {
+    body: JSON.stringify(await current(page)),
+    contentType: 'application/json',
+  })
+  expect(
+    keypad.filter((button) => !button.id.startsWith('digit.')).every((button) => !!button.icon),
+  ).toBe(true)
   const input = page.getByLabel('PIN', { exact: true })
   await expect(input).toHaveAttribute('type', 'password')
   await press(page, 'confirm')
@@ -239,6 +276,11 @@ test('FoxOE unlocks through the shared shuffled PIN form, then exposes only perm
     expect(
       (await current(page))!.buttons.filter((b) => b?.id.startsWith('digit.')).map((b) => b!.label),
     ).toEqual([...touchDigits.slice(0, 6), touchDigits[9], ...touchDigits.slice(6, 9)])
+    expect(
+      (await current(page))!.buttons
+        .filter((button) => button?.id.startsWith('digit.'))
+        .every((button) => button!.icon === null),
+    ).toBe(true)
   }
   await ready(page, 'confirm')
   await press(page, 'confirm')
@@ -350,6 +392,18 @@ test('printer quick controls share handlers, recover after failure and reject st
   await ready(page, 'hold')
   expect((await current(page))!.buttons[13]?.id).toBe('lock')
   expect((await current(page))!.buttons.length).toBe(14)
+  expect(
+    Object.fromEntries(
+      (await current(page))!.buttons.filter((b) => b !== null).map((b) => [b.id, b.icon]),
+    ),
+  ).toEqual({
+    print: 'printer',
+    hold: 'pause',
+    stop: 'stop-circle',
+    emergency: 'hand-raised',
+    back: 'arrow-left',
+    lock: 'lock-closed',
+  })
   await press(page, 'print')
   expect(state.prints).toEqual([])
 
@@ -373,6 +427,7 @@ test('printer quick controls share handlers, recover after failure and reject st
   await expect
     .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'hold')?.label)
     .toBe('Resume printer')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'hold')?.icon).toBe('play')
   await press(page, 'hold', beforeHold)
   expect(state.holds.length).toBe(2)
   await press(page, 'hold')

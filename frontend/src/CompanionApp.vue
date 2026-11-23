@@ -496,6 +496,8 @@ const deckScreen = computed<DeckScreen>(() => {
       id,
       label,
       icon,
+      // Leave room for two label lines beneath FoxOE's 36px symbol.
+      textSize: 10,
       disabled: blocked,
       run: () => {
         // Recheck immediately: a dialog can open before the DOM observer runs.
@@ -514,7 +516,7 @@ const deckScreen = computed<DeckScreen>(() => {
       button(
         'previous',
         t('common.previous'),
-        'back',
+        'arrow-left',
         () => {
           deckPage.value = page - 1
         },
@@ -525,7 +527,7 @@ const deckScreen = computed<DeckScreen>(() => {
       button(
         'next',
         t('common.next'),
-        'play',
+        'arrow-right',
         () => {
           deckPage.value = page + 1
         },
@@ -540,15 +542,15 @@ const deckScreen = computed<DeckScreen>(() => {
     if (!unlocking.value)
       return {
         context: 'locked',
-        buttons: [button('unlock', t('common.unlock'), 'keypad', openUnlock)],
+        buttons: [button('unlock', t('common.unlock'), 'lock-open', openUnlock)],
       }
-    const cancel = button('cancel', t('common.cancel'), 'close', closeUnlock)
+    const cancel = button('cancel', t('common.cancel'), 'xmark', closeUnlock)
     if (!userId.value)
       return {
         context: `users:${deckPage.value}:${station.value.users.map((user) => user.id).join(',')}`,
         buttons: paged(
           station.value.users.map((user, index) =>
-            button(`user.${index}`, user.username, 'window', () => {
+            button(`user.${index}`, user.username, 'user', () => {
               void chooseUser(user.id)
             }),
           ),
@@ -556,15 +558,16 @@ const deckScreen = computed<DeckScreen>(() => {
         ),
       }
     if (!pinEntry.value) return { context: 'pin-loading', buttons: [] }
-    const digits = pinEntry.value.digits.map((digit) =>
-      button(
+    const digits = pinEntry.value.digits.map((digit) => ({
+      ...button(
         `digit.${digit}`,
         digit,
-        'keypad',
+        null,
         () => pinEntry.value?.press(digit),
         pin.value.length >= 12,
       ),
-    )
+      textSize: 32,
+    }))
     // Match the 5×3 physical keypad arrangement; shuffled digits come directly
     // from PinEntry, so the touch and hardware layouts change together.
     return {
@@ -594,7 +597,7 @@ const deckScreen = computed<DeckScreen>(() => {
         button(
           'clear',
           t('pinEntry.clear'),
-          'close',
+          'trash',
           () => pinEntry.value?.press('clear'),
           !pin.value.length,
         ),
@@ -604,7 +607,7 @@ const deckScreen = computed<DeckScreen>(() => {
   const lockButton = button(
     'lock',
     t('companionApp.lock'),
-    'keypad',
+    'lock-closed',
     () => void lock(),
     false,
     true,
@@ -649,7 +652,7 @@ const deckScreen = computed<DeckScreen>(() => {
               currentStatus?.automatic_printing_held
                 ? t('uiMessages.resumePrinter')
                 : t('uiMessages.holdPrinter'),
-              currentStatus?.automatic_printing_held ? 'play' : 'window',
+              currentStatus?.automatic_printing_held ? 'play' : 'pause',
               () => void hold(),
               !operational.value || !currentStatus,
             )
@@ -659,7 +662,7 @@ const deckScreen = computed<DeckScreen>(() => {
           ? button(
               'stop',
               t('common.stopAfterLabel'),
-              'close',
+              'stop-circle',
               () => void stop(printer, 'after_current'),
               false,
               true,
@@ -669,7 +672,7 @@ const deckScreen = computed<DeckScreen>(() => {
           ? button(
               'emergency',
               t('common.emergencyStop'),
-              'close',
+              'hand-raised',
               () => void stop(printer, 'emergency'),
               false,
               true,
@@ -683,7 +686,7 @@ const deckScreen = computed<DeckScreen>(() => {
         button(
           'back',
           t('companionPacking.backToPrinters'),
-          'back',
+          'arrow-left',
           () => openControls(printer),
           false,
           true,

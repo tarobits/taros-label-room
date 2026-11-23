@@ -1,5 +1,5 @@
-/** FoxOE's documented page bridge, compatible with sdk/foxoe.js in v0.1.0-pre2.
- * https://github.com/tarobits/foxoe/blob/v0.1.0-pre2/docs/API.md
+/** FoxOE's documented page bridge, using its Heroicons and text-only key support.
+ * https://github.com/tarobits/foxoe/blob/main/docs/API.md
  * No credentials or PIN values cross this interface. The extension authenticates
  * the selected tab; station actions still use the companion's normal session.
  */
@@ -8,7 +8,24 @@ import { randomUUID } from '../shared/uuid'
 export interface DeckButton {
   id: string
   label: string
-  icon: 'window' | 'printer' | 'keypad' | 'play' | 'backspace' | 'check' | 'close' | 'back'
+  // Exact API identifiers from FoxOE's foxoe/icon_catalog.json.
+  icon:
+    | 'printer'
+    | 'play'
+    | 'backspace'
+    | 'check'
+    | 'xmark'
+    | 'arrow-left'
+    | 'arrow-right'
+    | 'lock-open'
+    | 'lock-closed'
+    | 'user'
+    | 'trash'
+    | 'pause'
+    | 'stop-circle'
+    | 'hand-raised'
+    | null
+  textSize?: number
   disabled?: boolean
   run: () => void
 }
@@ -104,6 +121,7 @@ export function createFoxoeDeck(target: Window = window) {
             id: button.id,
             label: Array.from(button.label).slice(0, 32).join(''),
             icon: button.icon,
+            ...(button.textSize === undefined ? {} : { textSize: button.textSize }),
             disabled: !!button.disabled,
           },
       )
