@@ -2,6 +2,16 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-pre1] - 2026-11-23
+
+### Added
+
+- Optional FoxOE Stream Deck controls for companion stations: unlock, choose a
+  user, enter a PIN with the configured keypad shuffling, and select permitted
+  printers. Controls follow the station's busy and offline state, recover after
+  reconnecting, and preserve FoxOE's Home key.
+- Companion setup instructions for FoxOE's application entry and browser bridge.
+
 ## [0.22.0] - 2026-11-23
 
 ### Added
