@@ -115,6 +115,40 @@ test('screen changes are serialized and old or unacknowledged actions never exec
   f.deck.dispose()
 })
 
+test('key colors preserve explicit resets and color changes invalidate old presses', () => {
+  const f = fixture()
+  let calls = 0
+  const setColors = (colors) => {
+    const next = screen('colors', () => calls++)
+    Object.assign(next.buttons[0], colors)
+    f.deck.setScreen(next)
+  }
+  setColors({})
+  f.receive({ type: 'connection', connected: true })
+  assert.ok(!Object.hasOwn(f.last().layout.buttons[0], 'iconColor'))
+  f.ack()
+  const old = f.last().layout.id
+  setColors({ iconColor: '#4ade80', textColor: '#ffffff', backgroundColor: '#1f2937' })
+  const colored = f.last().layout.buttons[0]
+  assert.equal(colored.iconColor, '#4ade80')
+  assert.equal(colored.textColor, '#ffffff')
+  assert.equal(colored.backgroundColor, '#1f2937')
+  f.press('confirm', old)
+  assert.equal(calls, 0)
+  f.ack()
+  f.press('confirm')
+  assert.equal(calls, 1)
+  setColors({ iconColor: null, textColor: null, backgroundColor: null })
+  const reset = f.last().layout.buttons[0]
+  for (const field of ['iconColor', 'textColor', 'backgroundColor'])
+    assert.equal(reset[field], null)
+  f.ack()
+  f.press('confirm')
+  assert.equal(calls, 2)
+  f.deck.dispose()
+  assert.equal(f.timers.size, 0)
+})
+
 test('disconnect cancels pending work and reconnect gives the screen a fresh identity', () => {
   const f = fixture()
   let calls = 0

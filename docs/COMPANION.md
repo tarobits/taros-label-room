@@ -141,6 +141,10 @@ companion page; normal touch and keyboard controls remain available without it.
    **Hold/Resume**, **Stop after label**, and **Emergency stop**, according to the
    user's permissions and printer state. Select labels on the touchscreen before
    using Print selected; any required confirmations also stay on the touchscreen.
+   **Print tape queue** prints the queue for the currently installed tape, using
+   the touchscreen's destination and existing print checks. **Show queue** brings
+   that printer's queue into view on the touchscreen. **Pack labels** opens its
+   packing screen; **Clear block** opens the existing confirmation when permitted.
 4. **Back to printers** returns to the printer list. Lists longer than eleven
    printers have Previous and Next keys. **Lock** is available on both screens,
    immediately to the left of **Home**, which FoxOE supplies as key 15.
@@ -160,11 +164,13 @@ for the existing inactivity lock; merely connecting the deck does not.
 This integration uses dynamic layouts and needs no registration credential in
 the companion, no connection to FoxOE's network registration port, and no browser
 access to its loopback API. The FoxOE app entry and extension pairing are required.
-Queue selection, cartridge management and configuration remain on the touchscreen.
+Queue selection, packing interactions, cartridge management, configuration and
+confirmations remain on the touchscreen.
 The companion uses Heroicons for actions, including lock, user, pause/resume,
 stop and emergency stop. PIN digits use large text-only keys (`icon: null`,
 `textSize: 32`). This requires FoxOE's Heroicons catalog, nullable button icons,
-and text-size support.
+text-size support, and key colors. Print/resume icons are green, hold/stop-after-label
+icons amber, and emergency stop red; key backgrounds and text retain FoxOE's defaults.
 
 ## Read-only status API for external displays
 

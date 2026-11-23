@@ -24,8 +24,15 @@ export interface DeckButton {
     | 'pause'
     | 'stop-circle'
     | 'hand-raised'
+    | 'rectangle-stack'
+    | 'queue-list'
+    | 'archive-box'
+    | 'shield-check'
     | null
   textSize?: number
+  iconColor?: `#${string}` | null
+  textColor?: `#${string}` | null
+  backgroundColor?: `#${string}` | null
   disabled?: boolean
   run: () => void
 }
@@ -122,6 +129,11 @@ export function createFoxoeDeck(target: Window = window) {
             label: Array.from(button.label).slice(0, 32).join(''),
             icon: button.icon,
             ...(button.textSize === undefined ? {} : { textSize: button.textSize }),
+            ...(button.iconColor === undefined ? {} : { iconColor: button.iconColor }),
+            ...(button.textColor === undefined ? {} : { textColor: button.textColor }),
+            ...(button.backgroundColor === undefined
+              ? {}
+              : { backgroundColor: button.backgroundColor }),
             disabled: !!button.disabled,
           },
       )

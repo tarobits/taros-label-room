@@ -492,10 +492,19 @@ const deckScreen = computed<DeckScreen>(() => {
     local = false,
   ): DeckButton {
     const blocked = disabled || unavailable || (!local && !station.value?.online)
+    const iconColor: DeckButton['iconColor'] =
+      id === 'print' || id === 'print-tape' || (id === 'hold' && icon === 'play')
+        ? '#4ade80'
+        : id === 'hold' || id === 'stop'
+          ? '#fbbf24'
+          : id === 'emergency'
+            ? '#f87171'
+            : undefined
     return {
       id,
       label,
       icon,
+      ...(iconColor === undefined ? {} : { iconColor }),
       // Leave room for two label lines beneath FoxOE's 36px symbol.
       textSize: 10,
       disabled: blocked,
@@ -630,6 +639,8 @@ const deckScreen = computed<DeckScreen>(() => {
         printer.id,
         destination.value,
         copyIds.value,
+        currentStatus?.active_cartridge_id,
+        installedProfile.value?.id,
       ]),
       buttons: [
         canPrint
@@ -657,7 +668,20 @@ const deckScreen = computed<DeckScreen>(() => {
               !operational.value || !currentStatus,
             )
           : null,
-        null,
+        canPrint
+          ? button(
+              'print-tape',
+              t('companionApp.printTapeQueue'),
+              'rectangle-stack',
+              () => void printProfileQueue(),
+              !operational.value ||
+                !currentStatus ||
+                !installedProfile.value ||
+                printer.blocked ||
+                printer.printing ||
+                !!currentStatus.printing,
+            )
+          : null,
         allowStop(printer, 'after_current')
           ? button(
               'stop',
@@ -678,9 +702,40 @@ const deckScreen = computed<DeckScreen>(() => {
               true,
             )
           : null,
-        null,
-        null,
-        null,
+        button(
+          'queue',
+          t('companionApp.showQueue'),
+          'queue-list',
+          () => {
+            void nextTick(() => {
+              const heading = document
+                .getElementById(`station-printer-${printer.local_id}`)
+                ?.querySelector<HTMLElement>('.station-queue h3')
+              heading?.focus({ preventScroll: true })
+              heading?.scrollIntoView({ block: 'start' })
+            })
+          },
+          false,
+          true,
+        ),
+        can(printer.id, 'view_activity')
+          ? button(
+              'pack',
+              t('companionApp.packLabels'),
+              'archive-box',
+              () => void openPacking(printer),
+              !operational.value,
+            )
+          : null,
+        printer.blocked && can(printer.id, 'review')
+          ? button(
+              'clear-block',
+              t('common.clearBlock'),
+              'shield-check',
+              () => void clearBlock(),
+              !operational.value || !currentStatus || !!currentStatus.needs_review.length,
+            )
+          : null,
         null,
         null,
         button(
@@ -1293,7 +1348,7 @@ function changePage(delta: number) {
                   </div>
                   <section class="station-queue" :aria-label="$t('companionApp.printerQueue')">
                     <div class="row wrap spread">
-                      <h3>{{ $t('companionApp.queue') }}</h3>
+                      <h3 tabindex="-1">{{ $t('companionApp.queue') }}</h3>
                       <label v-if="destinations.length > 1"
                         >{{ $t('common.destination')
                         }}<select v-model="destination" @change="changeDestination">
