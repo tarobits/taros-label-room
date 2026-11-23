@@ -2,6 +2,24 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.22.0] - 2026-11-23
+
+### Added
+
+- Horizontal and vertical label canvases, saved per template. Switching orientation
+  keeps existing elements at their positions and sizes; vertical automatic length
+  grows downward.
+- Barcode scanning-margin warnings when nearby printed artwork or the label edge
+  leaves insufficient clear space.
+
+### Changed
+
+- Redesigned emails with light and dark themes and printer illustrations for
+  verification, password prompts and notifications, including green success and
+  red error indicators.
+- New barcode boxes fit the bars without including scanning margins. Existing
+  barcode layouts retain their original sizing.
+
 ## [0.21.0] - 2026-11-20
 
 ### Changed
@@ -1180,4 +1198,5 @@ Initial release of Label Printer Server.
 **Printing limitation:** Cancellation may finish the current label before stopping
 subsequent labels.
 
+[0.22.0]: https://github.com/tarobits/taros-label-room/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/tarobits/taros-label-room/tree/v0.21.0
