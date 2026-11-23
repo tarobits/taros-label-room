@@ -2,6 +2,19 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-pre5] - 2026-11-23
+
+### Added
+
+- Stream Deck packing controls for previous and next completed runs, scrolling,
+  switching between requester and print order, and returning to printer controls.
+  Run navigation skips unfinished runs across pages; Back remains available while
+  a run is loading.
+
+### Fixed
+
+- Shortened English and German Stream Deck action labels to fit beneath their icons.
+
 ## [0.23.0-pre4] - 2026-11-23
 
 ### Added
