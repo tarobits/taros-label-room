@@ -2,6 +2,25 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-pre4] - 2026-11-23
+
+### Added
+
+- Companion Stream Deck shortcuts to print the queue for the installed tape,
+  show the touchscreen queue, open label packing, and clear a printer block.
+  Existing permissions, print checks and block-clearing confirmations apply;
+  changing the installed tape invalidates old button presses.
+
+### Changed
+
+- Action icons are green for printing and resuming, amber for holding and
+  stopping after a label, and red for emergency stop. Backgrounds, labels,
+  navigation keys and icon-free PIN digits retain their existing colors.
+
+**FoxOE compatibility:** The Stream Deck integration now also requires FoxOE's
+key-color API. Update FoxOE to a version supporting key colors before using
+this prerelease's deck controls.
+
 ## [0.23.0-pre3] - 2026-11-23
 
 ### Changed

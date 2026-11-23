@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "label-printer-server"
-version = "0.23.0-pre3"
+version = "0.23.0-pre4"
 description = "Persistent tape-aware label queue with Brother USB printers and groups"
 license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE", "NOTICE.md", "app/fonts/OFL.txt"]
