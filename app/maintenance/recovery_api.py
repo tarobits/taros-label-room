@@ -26,6 +26,7 @@ from app.db import begin_write
 from app.i18n import Language, Message, render, request_language, user_language
 from app.models import AuthSession, NotificationEndpoint, RecoveryToken, User
 from app.notifications.email_delivery import EmailAddress, email_enabled, send_email
+from app.notifications.email_templates import render_email
 from app.notifications.notification_api import (
     EndpointInput,
     update_configuration,
@@ -122,6 +123,21 @@ def deliver_link(
             recipient,
             render("recoveryMessages.subject", language, action=action),
             render("recoveryMessages.linkBody", language, action=action, link=link),
+            html_body=render_email(
+                action,
+                render(
+                    "emailMessages.verifyBody"
+                    if purpose == "verify"
+                    else "emailMessages.resetBody",
+                    language,
+                ),
+                language,
+                action_url=link,
+                action_label=action,
+                note=render("emailMessages.linkExpiry", language),
+                footer=render("emailMessages.ignoreRequest", language),
+            ),
+            artwork="check" if purpose == "verify" else "password",
         )
     except Exception:
         logger.warning("Account email delivery failed")
@@ -267,6 +283,12 @@ def password_changed_email(settings: Settings, recipient: str, language: Languag
             recipient,
             render("recoveryMessages.changedSubject", language),
             render("recoveryMessages.changedBody", language),
+            html_body=render_email(
+                render("emailMessages.passwordChanged", language),
+                render("recoveryMessages.changedBody", language),
+                language,
+            ),
+            artwork="password",
         )
     except Exception:
         logger.warning("Account email delivery failed")

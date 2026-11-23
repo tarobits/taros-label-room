@@ -65,8 +65,16 @@ if __name__ == "__main__":
         push_api.send_push = capture_push
         notification_routing.send_push = capture_push
 
-        def capture_email(settings, recipient, subject, body):
-            messages.append({"recipient": recipient, "subject": subject, "body": body})
+        def capture_email(settings, recipient, subject, body, *, html_body=None, artwork="default"):
+            messages.append(
+                {
+                    "recipient": recipient,
+                    "subject": subject,
+                    "body": body,
+                    "html": html_body or "",
+                    "artwork": artwork,
+                }
+            )
 
         # Isolated browser fixtures never contact a real mail server.
         recovery_api.send_email = capture_email

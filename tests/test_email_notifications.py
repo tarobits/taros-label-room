@@ -70,7 +70,20 @@ def test_smtp_modes_validate_tls_and_use_envelope_recipient(monkeypatch, securit
     assert sender[0].display_name == from_name
     if not from_name:
         assert message["From"] == "labels@example.invalid"
-    assert message.get_content().strip() == "Open the printer settings."
+    assert parsed.get_content_type() == "multipart/alternative"
+    plain_part = parsed.get_body(preferencelist=("plain",))
+    html_part = parsed.get_body(preferencelist=("html",))
+    assert plain_part is not None and html_part is not None
+    assert plain_part.get_content().strip() == "Open the printer settings."
+    html = html_part.get_content()
+    assert "Open the printer settings." in html
+    assert "prefers-color-scheme: dark" in html
+    images = [part for part in parsed.walk() if part.get_content_type() == "image/png"]
+    assert len(images) == 1
+    assert images[0]["Content-Disposition"] == "inline"
+    assert f"cid:{images[0]['Content-ID'][1:-1]}" in html
+    payload = images[0].get_payload(decode=True)
+    assert isinstance(payload, bytes) and payload.startswith(b"\x89PNG")
 
 
 def test_sender_name_rejects_header_injection_before_connecting(monkeypatch):
@@ -158,8 +171,8 @@ def test_admin_email_endpoint_uses_existing_routing_and_retries(accounts, monkey
     assert endpoint["transport"] == "email" and not endpoint["has_token"]
     sent = []
 
-    def email(settings, recipient, title, body):
-        sent.append((recipient, title, body))
+    def email(settings, recipient, title, body, **kwargs):
+        sent.append((recipient, title, body, kwargs["html_body"]))
         if len(sent) == 1:
             raise OSError("smtp-private-secret")
 
@@ -175,6 +188,8 @@ def test_admin_email_endpoint_uses_existing_routing_and_retries(accounts, monkey
     deliver_routed_pending(admin.app.state.factory, settings, now + 30)
     assert len(sent) == 2 and sent[-1][0] == "ops@example.invalid"
     assert sent[-1][2].endswith(settings.public_url + "/#/printers")
+    assert f'href="{settings.public_url}/#/printers"' in sent[-1][3]
+    assert "Open Taro&#x27;s Label Room" in sent[-1][3]
     with admin.app.state.factory() as session:
         assert session.scalar(select(NotificationDelivery)).delivered_at == now + 30
 
@@ -190,6 +205,48 @@ def make_subscriber(client, username):
             role.permissions = [
                 {"kind": "destination", "destination_id": "main", "level": "moderator"}
             ]
+
+
+def test_html_notifications_follow_current_language_and_escape_names_on_retry(
+    accounts, monkeypatch
+):
+    admin, alice, _ = accounts
+    make_subscriber(alice, "alice")
+    assert (
+        alice.put(
+            "/api/auth/email/subscription", json={"enabled": True, "kinds": ["general"]}
+        ).status_code
+        == 204
+    )
+    sent = []
+
+    def email(settings, recipient, subject, body, **kwargs):
+        sent.append(kwargs["html_body"])
+        if len(sent) == 1:
+            raise OSError("offline")
+
+    monkeypatch.setattr("app.notifications.notification_routing.send_email", email)
+    now = time.time()
+    with admin.app.state.factory.begin() as session:
+        enqueue(
+            session,
+            '<script>alert("title")</script>',
+            '<img src=x onerror="alert(1)">',
+            "/#/printers",
+            recipient_id="alice",
+            now=now,
+        )
+    deliver_routed_pending(admin.app.state.factory, admin.app.state.settings, now)
+    assert len(sent) == 1 and '<html lang="en">' in sent[0]
+    with admin.app.state.factory.begin() as session:
+        session.get(User, "alice").language = "de"
+    deliver_routed_pending(admin.app.state.factory, admin.app.state.settings, now + 30)
+    assert len(sent) == 2 and '<html lang="de">' in sent[1]
+    assert "Taro&#x27;s Label Room öffnen" in sent[1]
+    assert "&lt;script&gt;" in sent[1] and "&lt;img src=x" in sent[1]
+    assert "<script>" not in sent[1] and "<img src=x" not in sent[1]
+    with admin.app.state.factory() as session:
+        assert session.scalar(select(NotificationDelivery)).delivered_at == now + 30
 
 
 def test_personal_email_requires_verification_and_cannot_bypass_access(accounts):

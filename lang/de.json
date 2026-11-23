@@ -295,6 +295,14 @@
     "boolean": "Wahrheitswert",
     "image": "Bild"
   },
+  "emailMessages": {
+    "verifyBody": "Bestätige diese E-Mail-Adresse für dein Konto.",
+    "resetBody": "Wähle ein neues Passwort für dein Konto.",
+    "linkExpiry": "Dieser Link läuft nach 30 Minuten ab und kann einmal verwendet werden.",
+    "ignoreRequest": "Falls du dies nicht angefordert hast, ignoriere diese E-Mail.",
+    "passwordChanged": "Dein Passwort wurde zurückgesetzt",
+    "openApp": "Taro's Label Room öffnen"
+  },
   "recoveryMessages": {
     "signIn": "Melde dich an, um dein Konto zu verwalten",
     "unavailable": "Der E-Mail-Versand ist nicht konfiguriert; wende dich an deinen Administrator",

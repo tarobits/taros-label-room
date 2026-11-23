@@ -5,11 +5,18 @@ import ssl
 from email.errors import HeaderParseError
 from email.headerregistry import Address
 from email.message import EmailMessage
+from email.utils import make_msgid
 from typing import Annotated
 
 from pydantic import AfterValidator
 
 from app.config import Settings
+from app.notifications.email_templates import (
+    ILLUSTRATION_CID,
+    EmailIllustration,
+    illustration,
+    render_email,
+)
 
 
 def normalize_email(value: str) -> str:
@@ -39,7 +46,15 @@ def email_enabled(settings: Settings) -> bool:
     return bool(settings.smtp_host and settings.smtp_from)
 
 
-def send_email(settings: Settings, recipient: str, subject: str, body: str) -> None:
+def send_email(
+    settings: Settings,
+    recipient: str,
+    subject: str,
+    body: str,
+    *,
+    html_body: str | None = None,
+    artwork: EmailIllustration = "default",
+) -> None:
     if not email_enabled(settings):
         raise ValueError("Email delivery is not configured")
     message = EmailMessage()
@@ -49,6 +64,23 @@ def send_email(settings: Settings, recipient: str, subject: str, body: str) -> N
     message["To"] = normalize_email(recipient)
     message["Subject"] = subject
     message.set_content(body)
+    # Distinct IDs prevent an email client from reusing another message's artwork.
+    image_cid = make_msgid(domain="taros-label-room")
+    html = html_body if html_body is not None else render_email(subject, body)
+    message.add_alternative(
+        html.replace(f'src="cid:{ILLUSTRATION_CID}"', f'src="cid:{image_cid[1:-1]}"'),
+        subtype="html",
+    )
+    # Related MIME content keeps the artwork local: no remote image requests or tracking.
+    html_part = message.get_body(preferencelist=("html",))
+    assert html_part is not None
+    html_part.add_related(
+        illustration(artwork),
+        maintype="image",
+        subtype="png",
+        cid=image_cid,
+        disposition="inline",
+    )
     connection = (
         smtplib.SMTP_SSL(
             settings.smtp_host, settings.smtp_port, timeout=10, context=ssl.create_default_context()

@@ -26,7 +26,7 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1", "mypy>=1.15,<2", "pyright==1.1.414", "t
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["fonts/*.ttf", "fonts/*.txt"]
+app = ["fonts/*.ttf", "fonts/*.txt", "notifications/assets/*.png", "notifications/templates/*.html"]
 
 [tool.setuptools.data-files]
 "share/label-printer-server/lang" = ["lang/en.json", "lang/de.json"]

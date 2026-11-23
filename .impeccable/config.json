@@ -9,6 +9,24 @@
         "value": "sfmono-regular",
         "createdAt": "2026-11-12T21:51:40.236Z",
         "reason": "Codex review: the existing CodeMirror source editor already uses SFMono-Regular in HEAD; technical source text intentionally uses a monospace stack. This translation change preserves it."
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "app/notifications/templates/email.html"
+        ],
+        "createdAt": "2026-11-20T20:13:57.032Z",
+        "reason": "Codex review: browser computed colors in both themes at 320, 390, 600 and 900 pixels have a minimum text contrast of 6.13:1; the detector does not resolve the email table inheritance and dark-mode overrides."
+      },
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "files": [
+          "app/notifications/templates/email.html"
+        ],
+        "createdAt": "2026-11-20T20:17:15.985Z",
+        "reason": "Codex review: DESIGN.md specifies Inter with system fallbacks as the established application font. The approved email direction retains that typography; changing brand typography is outside this refinement."
       }
     ]
   }

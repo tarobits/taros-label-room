@@ -28,7 +28,9 @@ def mailbox(auth_client, monkeypatch):
     messages = []
     monkeypatch.setattr(
         "app.maintenance.recovery_api.send_email",
-        lambda settings, to, subject, body: messages.append((to, subject, body)),
+        lambda settings, to, subject, body, **kwargs: messages.append(
+            (to, subject, body, kwargs["html_body"])
+        ),
     )
     return messages
 
@@ -66,6 +68,9 @@ def test_recovery_mail_uses_account_language_without_disclosing_account_existenc
     verify_address(client, mailbox)
     assert mailbox[-1][1] == "Bestätige deine E-Mail-Adresse · Taro's Label Room"
     assert "läuft nach 30 Minuten ab" in mailbox[-1][2]
+    assert '<html lang="de">' in mailbox[-1][3]
+    assert "Bestätige diese E-Mail-Adresse für dein Konto." in mailbox[-1][3]
+    assert f"token={email_token(mailbox)}" in mailbox[-1][3]
     assert client.post("/api/auth/logout").status_code == 204
     known = client.post(
         "/api/auth/password/forgot", json={"username": "admin"}, headers={"Accept-Language": "en"}
@@ -73,6 +78,8 @@ def test_recovery_mail_uses_account_language_without_disclosing_account_existenc
     token = email_token(mailbox)
     assert mailbox[-1][1] == "Setze dein Passwort zurück · Taro's Label Room"
     assert f"token={token}" in mailbox[-1][2]
+    assert "Wähle ein neues Passwort für dein Konto." in mailbox[-1][3]
+    assert f"token={token}" in mailbox[-1][3]
     count = len(mailbox)
     unknown = client.post(
         "/api/auth/password/forgot",
@@ -363,7 +370,7 @@ def test_failed_mail_is_generic_and_never_logs_credentials(
     setup_admin(client, tmp_path)
     verify_address(client, mailbox)
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError("private-smtp-secret")
 
     monkeypatch.setattr("app.maintenance.recovery_api.send_email", fail)

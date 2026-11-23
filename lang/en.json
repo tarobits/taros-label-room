@@ -295,6 +295,14 @@
     "boolean": "Boolean",
     "image": "Image"
   },
+  "emailMessages": {
+    "verifyBody": "Confirm this email address for your account.",
+    "resetBody": "Choose a new password for your account.",
+    "linkExpiry": "This link expires in 30 minutes and can be used once.",
+    "ignoreRequest": "If you did not request this, ignore this email.",
+    "passwordChanged": "Your password was reset",
+    "openApp": "Open Taro's Label Room"
+  },
   "recoveryMessages": {
     "signIn": "Sign in to manage your account",
     "unavailable": "Email delivery is not configured; contact your administrator",

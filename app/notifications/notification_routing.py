@@ -16,6 +16,7 @@ from app.models import (
     User,
 )
 from app.notifications.email_delivery import send_email
+from app.notifications.email_templates import notification_illustration, render_email
 from app.notifications.notification_types import PRINT_COMPLETION_KINDS, PRINTER_NOTIFICATION_KINDS
 from app.notifications.notifications import NtfySender, notification_valid, waiting_destinations
 from app.notifications.push_delivery import ExpiredSubscription, active_push_session, send_push
@@ -349,17 +350,29 @@ def deliver_routed_pending(
                 if notice is not None:
                     refresh_summary(session, notice)
                 continue
+            language = (
+                user_language(session.get(User, endpoint.owner_id)) if endpoint.owner_id else "en"
+            )
             session.expunge(endpoint)
         failed = False
         expired = False
         try:
             if send is None:
                 if endpoint.transport == "email":
+                    link = settings.public_url.rstrip("/") + message.path
                     send_email(
                         settings,
                         endpoint.email,
                         message.title,
-                        message.message + "\n\n" + settings.public_url.rstrip("/") + message.path,
+                        message.message + "\n\n" + link,
+                        html_body=render_email(
+                            message.title,
+                            message.message,
+                            language,
+                            action_url=link,
+                            action_label=render("emailMessages.openApp", language),
+                        ),
+                        artwork=notification_illustration(message.kind),
                     )
                 elif endpoint.transport == "push":
                     send_push(settings, endpoint, message)
