@@ -43,6 +43,7 @@ async function fixture(page: Page, many = false) {
     blocked: false,
     printing: false,
     can_stop: false,
+    no_automatic_printing: false,
     status: { connected: true, tape_width_mm: 24, error: null },
   }))
   const state = {
@@ -52,6 +53,18 @@ async function fixture(page: Page, many = false) {
     language: 'en',
     attempts: [] as string[],
     activity: 0,
+    printers,
+    permissions: ['printer.view'],
+    held: false,
+    stopPolicy: {} as Record<string, boolean>,
+    holds: [] as boolean[],
+    stops: [] as { printer: string; mode: string }[],
+    prints: [] as { copy_ids: string[] }[],
+    failHold: false,
+    holdWait: Promise.resolve(),
+    shortage: false,
+    queue: false,
+    queueCopy: 'copy-1',
   }
   await page.addInitScript(() => {
     // Plain HTTP LAN origins lack randomUUID, but the companion supports them.
@@ -77,7 +90,9 @@ async function fixture(page: Page, many = false) {
   })
   await page.route('http://localhost:12345/**', async (route) => {
     const path = new URL(route.request().url()).pathname
-    if (path === '/api/station') {
+    if (path === '/api/health') {
+      await route.fulfill({ json: { healthy: state.reachable } })
+    } else if (path === '/api/station') {
       if (!state.reachable) {
         await route.fulfill({ status: 503, json: { detail: 'Offline' } })
         return
@@ -99,13 +114,13 @@ async function fixture(page: Page, many = false) {
                 location_id: 'local',
                 groups: {},
                 printer_permissions: Object.fromEntries(
-                  printers.slice(0, many ? 14 : 1).map((p) => [p.id, ['printer.view']]),
+                  printers.slice(0, many ? 14 : 1).map((p) => [p.id, state.permissions]),
                 ),
               },
           printers,
           removed_printers: [],
           csrf_token: 'fixture',
-          stop_policy: {},
+          stop_policy: state.stopPolicy,
           lock_remaining_seconds: 300,
           pin_keypad: { enabled: true, shuffle: 'each_keypress' },
         },
@@ -125,14 +140,67 @@ async function fixture(page: Page, many = false) {
     } else if (path === '/api/station/activity') {
       state.activity++
       await route.fulfill({ json: { lock_remaining_seconds: 300 } })
+    } else if (path.endsWith('/stop')) {
+      state.stops.push({ printer: path, mode: route.request().postDataJSON().mode })
+      await route.fulfill({ json: { ok: true } })
+    } else if (path === '/api/proxy/printer/automatic-printing') {
+      state.holds.push(route.request().postDataJSON().held)
+      await state.holdWait
+      if (state.failHold) {
+        state.failHold = false
+        await route.fulfill({ status: 503, json: { detail: 'Hold failed' } })
+      } else {
+        state.held = route.request().postDataJSON().held
+        await route.fulfill({ json: { ok: true } })
+      }
+    } else if (path === '/api/proxy/queue/print') {
+      state.prints.push(route.request().postDataJSON())
+      if (state.shortage)
+        await route.fulfill({
+          status: 409,
+          json: {
+            detail: {
+              code: 'tape_shortage',
+              message: 'Not enough tape',
+              confirmation: 'fixture-shortage',
+            },
+          },
+        })
+      else await route.fulfill({ json: { ok: true } })
+    } else if (path === '/api/proxy/queue/groups') {
+      await route.fulfill({
+        json: state.queue
+          ? [
+              {
+                id: 'group',
+                run_id: 'run',
+                name: 'Test labels',
+                jobs: [
+                  {
+                    id: 'job',
+                    process_name: 'Test labels',
+                    can_print: true,
+                    profile_name: '24 mm',
+                    labels: [{ id: state.queueCopy, state: 'queued' }],
+                    payers: [],
+                  },
+                ],
+              },
+            ]
+          : [],
+      })
     } else if (path === '/api/proxy/status') {
+      const id = new URL(route.request().url()).searchParams.get('printer_id')
+      const printer = printers.find((p) => p.id === id)
       await route.fulfill({
         json: {
-          printer_id: new URL(route.request().url()).searchParams.get('printer_id'),
+          printer_id: id,
           needs_review: [],
           queues: [],
           connected: true,
-          printing: null,
+          printing: printer?.printing ? { id: 'printing' } : null,
+          automatic_printing_held: state.held,
+          no_automatic_printing: printer?.no_automatic_printing,
         },
       })
     } else if (path.startsWith('/api/proxy/')) await route.fulfill({ json: [] })
@@ -198,7 +266,8 @@ test('FoxOE unlocks through the shared shuffled PIN form, then exposes only perm
   await expect(page.getByRole('button', { name: 'Close controls', exact: true })).toBeVisible()
   expect(state.activity).toBe(1)
   await page.screenshot({ path: 'test-results/foxoe-printer.png', animations: 'disabled' })
-  await page.getByRole('button', { name: 'Lock', exact: true }).click()
+  await ready(page, 'lock')
+  await press(page, 'lock')
   await ready(page, 'unlock')
   await expect(page.getByRole('button', { name: 'Close controls', exact: true })).toHaveCount(0)
 })
@@ -252,10 +321,185 @@ test('pagination, modal blocking, offline state and reconnect invalidate old dec
   await expect(page.getByRole('button', { name: 'Close controls', exact: true })).toBeVisible()
   state.online = false
   await page.evaluate(() => window.dispatchEvent(new Event('online')))
-  await expect
-    .poll(async () => (await current(page))?.buttons.every((b) => !b || b.disabled))
-    .toBe(true)
+  await ready(page, 'lock')
   state.online = true
   await page.evaluate(() => window.dispatchEvent(new Event('online')))
-  await ready(page, 'printer.12')
+  await ready(page, 'back')
+})
+
+async function refreshStation(page: Page) {
+  await page.evaluate(() => window.dispatchEvent(new Event('online')))
+}
+
+test('printer quick controls share handlers, recover after failure and reject stale or duplicate actions', async ({
+  page,
+}) => {
+  const state = await fixture(page)
+  state.locked = false
+  state.permissions.push(
+    'printer.hold_resume',
+    'printer.start_own',
+    'printer.stop_after_label',
+    'printer.emergency_stop',
+  )
+  state.printers[0].can_stop = true
+  state.queue = true
+  await refreshStation(page)
+  await ready(page, 'printer.0')
+  await press(page, 'printer.0')
+  await ready(page, 'hold')
+  expect((await current(page))!.buttons[13]?.id).toBe('lock')
+  expect((await current(page))!.buttons.length).toBe(14)
+  await press(page, 'print')
+  expect(state.prints).toEqual([])
+
+  state.failHold = true
+  await press(page, 'hold')
+  await expect(page.getByRole('alert')).toContainText('Hold failed')
+  await ready(page, 'hold')
+  let releaseHold!: () => void
+  state.holdWait = new Promise<void>((resolve) => {
+    releaseHold = resolve
+  })
+  const beforeHold = (await current(page))!.id
+  await press(page, 'hold')
+  await expect.poll(() => state.holds.length).toBe(2)
+  await press(page, 'hold', beforeHold)
+  await press(page, 'lock', beforeHold)
+  expect(state.locked).toBe(false)
+  expect(state.holds.length).toBe(2)
+  releaseHold()
+  await ready(page, 'hold')
+  await expect
+    .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'hold')?.label)
+    .toBe('Resume printer')
+  await press(page, 'hold', beforeHold)
+  expect(state.holds.length).toBe(2)
+  await press(page, 'hold')
+  await expect.poll(() => state.held).toBe(false)
+  await ready(page, 'stop')
+  await press(page, 'stop')
+  await ready(page, 'emergency')
+  await press(page, 'emergency')
+  await expect.poll(() => state.stops.map((s) => s.mode)).toEqual(['after_current', 'emergency'])
+  expect(state.stops.every((s) => s.printer === '/api/station/printers/local-0/stop')).toBe(true)
+
+  await page.locator('.station-queue-group > .station-job input[type=checkbox]').check()
+  await ready(page, 'print')
+  await test.info().attach('foxoe-controls.json', {
+    body: JSON.stringify(await current(page)),
+    contentType: 'application/json',
+  })
+  state.shortage = true
+  await press(page, 'print')
+  await expect(page.getByRole('dialog')).toContainText('Not enough tape')
+  await press(page, 'print')
+  expect(state.prints).toEqual([{ copy_ids: ['copy-1'] }])
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+  await ready(page, 'print')
+  state.shortage = false
+  const oldPrint = (await current(page))!.id
+  await press(page, 'print')
+  await press(page, 'print', oldPrint)
+  await expect.poll(() => state.prints.length).toBe(2)
+  await ready(page, 'back')
+  await press(page, 'back')
+  await ready(page, 'printer.0')
+  await press(page, 'print', oldPrint)
+  expect(state.prints.length).toBe(2)
+  await press(page, 'lock')
+  await ready(page, 'unlock')
+  expect(state.locked).toBe(true)
+})
+
+test('old print presses cannot target a replacement selection or survive permission removal', async ({
+  page,
+}) => {
+  const state = await fixture(page)
+  state.locked = false
+  state.permissions.push('printer.start_own')
+  state.queue = true
+  await refreshStation(page)
+  await ready(page, 'printer.0')
+  await press(page, 'printer.0')
+  const selection = page.locator('.station-queue-group > .station-job input[type=checkbox]')
+  await selection.check()
+  await ready(page, 'print')
+  const old = (await current(page))!.id
+  state.queueCopy = 'copy-2'
+  await refreshStation(page)
+  await expect(selection).not.toBeChecked()
+  await selection.check()
+  await ready(page, 'print')
+  await press(page, 'print', old)
+  expect(state.prints).toEqual([])
+  const replacement = (await current(page))!.id
+  state.permissions = ['printer.view']
+  await refreshStation(page)
+  await expect
+    .poll(async () => (await current(page))!.buttons.some((b) => b?.id === 'print'))
+    .toBe(false)
+  await press(page, 'print', replacement)
+  expect(state.prints).toEqual([])
+  state.permissions.push('printer.start_own')
+  await refreshStation(page)
+  await ready(page, 'print')
+  await press(page, 'print')
+  await expect.poll(() => state.prints).toEqual([{ copy_ids: ['copy-2'] }])
+})
+
+test('quick controls enforce permissions, printer state and local offline stop policy', async ({
+  page,
+}) => {
+  const state = await fixture(page)
+  state.locked = false
+  await refreshStation(page)
+  await ready(page, 'printer.0')
+  await press(page, 'printer.0')
+  await ready(page, 'back')
+  expect((await current(page))!.buttons.filter(Boolean).map((b) => b!.id)).toEqual(['back', 'lock'])
+  for (const id of ['hold', 'print', 'stop', 'emergency']) await press(page, id)
+  expect([state.holds, state.prints, state.stops]).toEqual([[], [], []])
+
+  state.permissions.push(
+    'printer.hold_resume',
+    'printer.start_any',
+    'printer.stop_after_label',
+    'printer.emergency_stop',
+  )
+  state.printers[0].can_stop = true
+  state.printers[0].no_automatic_printing = true
+  state.printers[0].printing = true
+  state.queue = true
+  await refreshStation(page)
+  await ready(page, 'emergency')
+  expect((await current(page))!.buttons.some((b) => b?.id === 'hold')).toBe(false)
+  await page.locator('.station-queue-group > .station-job input[type=checkbox]').check()
+  expect((await current(page))!.buttons.find((b) => b?.id === 'print')?.disabled).toBe(true)
+  state.printers[0].printing = false
+  state.printers[0].blocked = true
+  await refreshStation(page)
+  await expect(page.locator('.station-printer').first()).toContainText('Investigation required')
+  await press(page, 'print')
+  expect(state.prints).toEqual([])
+  state.printers[0].blocked = false
+  await refreshStation(page)
+  await ready(page, 'print')
+  const old = (await current(page))!.id
+  state.online = false
+  state.stopPolicy.offline_emergency = true
+  await refreshStation(page)
+  await expect
+    .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'print')?.disabled)
+    .toBe(true)
+  await press(page, 'print', old)
+  await press(page, 'stop', old)
+  expect(state.prints).toEqual([])
+  expect(state.stops).toEqual([])
+  await ready(page, 'emergency')
+  await press(page, 'emergency')
+  await expect.poll(() => state.stops.length).toBe(1)
+  await ready(page, 'lock')
+  await press(page, 'lock')
+  await expect.poll(() => state.locked).toBe(true)
 })

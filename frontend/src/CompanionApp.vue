@@ -478,7 +478,6 @@ const deckScreen = computed<DeckScreen>(() => {
   const disabled =
     !stationReachable.value ||
     serverUnavailable.value ||
-    !station.value?.online ||
     busy.value ||
     otherDialog.value ||
     !!config.value ||
@@ -490,22 +489,24 @@ const deckScreen = computed<DeckScreen>(() => {
     icon: DeckButton['icon'],
     run: () => void,
     unavailable = false,
+    local = false,
   ): DeckButton {
+    const blocked = disabled || unavailable || (!local && !station.value?.online)
     return {
       id,
       label,
       icon,
-      disabled: disabled || unavailable,
+      disabled: blocked,
       run: () => {
         // Recheck immediately: a dialog can open before the DOM observer runs.
-        if (disabled || unavailable || busy.value || hasOtherDialog()) return
+        if (blocked || busy.value || hasOtherDialog()) return
         touch()
         run()
       },
     }
   }
-  function paged(items: DeckButton[], cancel?: DeckButton) {
-    const size = cancel ? 11 : 12
+  function paged(items: DeckButton[], trailing: DeckButton) {
+    const size = 11
     const page = Math.min(deckPage.value, Math.max(0, Math.ceil(items.length / size) - 1))
     const result: (DeckButton | null)[] = items.slice(page * size, (page + 1) * size)
     while (result.length < size) result.push(null)
@@ -531,7 +532,7 @@ const deckScreen = computed<DeckScreen>(() => {
         (page + 1) * size >= items.length,
       ),
     )
-    if (cancel) result.push(cancel)
+    result.push(trailing)
     return result
   }
   if (!station.value) return { context: 'loading', buttons: [] }
@@ -600,6 +601,99 @@ const deckScreen = computed<DeckScreen>(() => {
       ],
     }
   }
+  const lockButton = button(
+    'lock',
+    t('companionApp.lock'),
+    'keypad',
+    () => void lock(),
+    false,
+    true,
+  )
+  const printer = active.value
+  if (printer && can(printer.id, 'view')) {
+    const currentStatus = status.value
+    const canPrint = can(printer.id, 'start_any') || can(printer.id, 'start_own')
+    const canHold =
+      can(printer.id, 'hold_resume') &&
+      !printer.no_automatic_printing &&
+      !currentStatus?.no_automatic_printing
+    return {
+      // Selection and destination changes must invalidate queued print presses,
+      // even when the new selection contains the same number of copies.
+      context: JSON.stringify([
+        'controls',
+        station.value.user?.id,
+        printer.local_id,
+        printer.id,
+        destination.value,
+        copyIds.value,
+      ]),
+      buttons: [
+        canPrint
+          ? button(
+              'print',
+              `${t('common.printSelected')}${copyIds.value.length})`,
+              'printer',
+              () => void start(),
+              !operational.value ||
+                !currentStatus ||
+                !copyIds.value.length ||
+                printer.blocked ||
+                printer.printing ||
+                !!currentStatus.printing,
+            )
+          : null,
+        canHold
+          ? button(
+              'hold',
+              currentStatus?.automatic_printing_held
+                ? t('uiMessages.resumePrinter')
+                : t('uiMessages.holdPrinter'),
+              currentStatus?.automatic_printing_held ? 'play' : 'window',
+              () => void hold(),
+              !operational.value || !currentStatus,
+            )
+          : null,
+        null,
+        allowStop(printer, 'after_current')
+          ? button(
+              'stop',
+              t('common.stopAfterLabel'),
+              'close',
+              () => void stop(printer, 'after_current'),
+              false,
+              true,
+            )
+          : null,
+        allowStop(printer, 'emergency')
+          ? button(
+              'emergency',
+              t('common.emergencyStop'),
+              'close',
+              () => void stop(printer, 'emergency'),
+              false,
+              true,
+            )
+          : null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        button(
+          'back',
+          t('companionPacking.backToPrinters'),
+          'back',
+          () => openControls(printer),
+          false,
+          true,
+        ),
+        null,
+        null,
+        lockButton,
+      ],
+    }
+  }
   return {
     context: `printers:${station.value.user?.id}:${deckPage.value}:${selected.value}:${station.value.printers.map((printer) => printer.local_id).join(',')}`,
     buttons: paged(
@@ -621,6 +715,7 @@ const deckScreen = computed<DeckScreen>(() => {
             !operational.value,
           ),
         ),
+      lockButton,
     ),
   }
 })

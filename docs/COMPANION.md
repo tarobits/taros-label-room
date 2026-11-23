@@ -130,29 +130,39 @@ The companion can use [FoxOE's browser bridge](https://github.com/tarobits/foxoe
 for PIN entry and printer selection. It activates when FoxOE connects to the
 companion page; normal touch and keyboard controls remain available without it.
 
-1. Install and pair FoxOE's Chromium extension, then select its kiosk tab as
-   described in [FoxOE's setup guide](https://github.com/tarobits/foxoe#raspberry-pi-usb-and-kiosk-setup).
+1. Install FoxOE's Chromium extension. Copy the **browser connection token** from
+   FoxOE Settings → System into the extension's options and save. Select its kiosk
+   tab as described in [FoxOE's setup guide](https://github.com/tarobits/foxoe#raspberry-pi-usb-and-kiosk-setup).
 2. In FoxOE Settings → Applications, add the companion's actual web URL and
    choose the printer icon. Open that app from the FoxOE dock in the selected tab.
 3. The deck offers **Unlock**, user selection when needed, and the PIN keypad.
    After unlocking, it shows the printers the current user can view. Pressing a
-   printer opens or closes its existing controls; lists longer than twelve
-   printers have Previous and Next keys. FoxOE retains key 15 for Home.
+   printer opens its touchscreen controls and a deck screen with **Print selected**,
+   **Hold/Resume**, **Stop after label**, and **Emergency stop**, according to the
+   user's permissions and printer state. Select labels on the touchscreen before
+   using Print selected; any required confirmations also stay on the touchscreen.
+4. **Back to printers** returns to the printer list. Lists longer than eleven
+   printers have Previous and Next keys. **Lock** is available on both screens,
+   immediately to the left of **Home**, which FoxOE supplies as key 15.
 
 PIN input uses the companion's existing validation, length limit, masking, and
 configured keypad shuffling. The deck does not display or receive the entered
 PIN as a label or value. Touch and deck input share the same field, including
 backspace and clear. Failed unlock attempts clear the field as usual.
 
-Actions are disabled while the companion is busy or offline, or another dialog
-or packing view is open. Old layouts and disconnected key presses are ignored.
+Actions are disabled while the companion is busy or unreachable, or another dialog
+or packing view is open. When only the main server is offline, local locking and
+stopping remain available according to the station's existing stop policy; printing
+and hold/resume are disabled. Old layouts and disconnected key presses are ignored.
 Reconnecting restores the current screen. Printer selection counts as activity
 for the existing inactivity lock; merely connecting the deck does not.
 
 This integration uses dynamic layouts and needs no registration credential in
 the companion, no connection to FoxOE's network registration port, and no browser
 access to its loopback API. The FoxOE app entry and extension pairing are required.
-Printing and queue actions remain on the touchscreen in this first integration.
+Queue selection, cartridge management and configuration remain on the touchscreen.
+The companion sends FoxOE's supported built-in icons alongside action labels;
+their appearance on physical keys depends on FoxOE's renderer.
 
 ## Read-only status API for external displays
 
