@@ -546,9 +546,12 @@ def test_new_repository_root_preserves_renamed_old_release_and_recovers_on_failu
     new_root = git(root, "commit-tree", f"{newest}^{{tree}}", "-m", "New repository root")
     git(root, "tag", "-f", "v2.0.0", new_root)
     git(root, "branch", "release", previous)
-    assert subprocess.run(
-        ["git", "merge-base", "--is-ancestor", "release", new_root], cwd=root
-    ).returncode == 1
+    assert (
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "release", new_root], cwd=root
+        ).returncode
+        == 1
+    )
     git(root, "branch", "-m", "release", "pre-polyform-release")
     assert git(root, "rev-parse", "HEAD") == previous
     test_updates_exact_tag_preserves_main_and_backups_and_rolls_back_on_failure(

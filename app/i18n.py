@@ -49,7 +49,7 @@ def catalog(language: Language) -> dict[str, str]:
     data = json.loads((root / f"{language}.json").read_text(encoding="utf-8"))
     result: dict[str, str] = {}
 
-    def flatten(value: dict, prefix: str = "") -> None:
+    def flatten(value: dict[str, Any], prefix: str = "") -> None:
         for key, child in value.items():
             path = f"{prefix}.{key}" if prefix else key
             if isinstance(child, dict):
@@ -88,7 +88,7 @@ class Message(str):
     key: str
     parameters: dict[str, Any]
 
-    def __new__(cls, key: str, **parameters: Any):
+    def __new__(cls, key: str, **parameters: Any) -> "Message":
         value = super().__new__(cls, render(key, **parameters))
         value.key = key
         value.parameters = parameters
@@ -116,7 +116,9 @@ class JoinedMessages(str):
     messages: Sequence["Message | JoinedMessages"]
     separator: str
 
-    def __new__(cls, messages: Sequence["Message | JoinedMessages"], separator: str = "; "):
+    def __new__(
+        cls, messages: Sequence["Message | JoinedMessages"], separator: str = "; "
+    ) -> "JoinedMessages":
         value = super().__new__(cls, separator.join(messages))
         value.messages = messages
         value.separator = separator
@@ -198,12 +200,12 @@ def notice_text(notice: Any, field: str, language: Language) -> str:
     if isinstance(descriptor, dict) and isinstance(descriptor.get("key"), str):
         return render_descriptor(descriptor, language)
     # Historical notices have no descriptor; preserve the recorded text.
-    return getattr(notice, field)
+    return cast(str, getattr(notice, field))
 
 
 def render_descriptor(descriptor: dict[str, Any], language: Language) -> str:
     if "messages" in descriptor:
-        return descriptor.get("separator", "; ").join(
+        return cast(str, descriptor.get("separator", "; ")).join(
             render_descriptor(message, language) for message in descriptor["messages"]
         )
     parameters = dict(descriptor.get("parameters", {}))

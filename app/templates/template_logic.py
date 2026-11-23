@@ -92,7 +92,7 @@ def logic_targets(document: "TemplateDocument") -> dict[str, Target]:
             properties["stroke"] = "number"
             if element.kind == "rectangle":
                 properties["filled"] = "boolean"
-        disabled = {}
+        disabled: dict[str, str] = {}
         if element.kind == "text":
             disabled["auto_width"] = Message("logicConstraints.configureWidth")
             if element.auto_width:

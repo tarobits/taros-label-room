@@ -114,7 +114,7 @@ class DeviceStatus(Input):
     diagnostics: dict[str, str] | None = None
 
     @model_validator(mode="after")
-    def supported_translation(self):
+    def supported_translation(self) -> "DeviceStatus":
         # Metadata is optional across versions; it may never override the reported text.
         self.error_translation = reason_descriptor(
             restore_reason(self.error, self.error_translation)

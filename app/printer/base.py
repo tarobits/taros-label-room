@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from threading import Event
-from typing import Literal, Protocol, Sequence, runtime_checkable
+from typing import Any, Literal, Protocol, Sequence, runtime_checkable
 
 from app.printer.messages import reason_descriptor, restore_reason
 
@@ -67,7 +67,7 @@ class PrinterStatus:
     # Adapters may distinguish an actionable media check from a hardware fault.
     # Unknown/older reports remain faults; this never clears an existing block.
     error_requires_investigation: bool = True
-    error_translation: dict | None = None
+    error_translation: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Keep the wire text plain: dataclass serialization must not copy a str subclass.

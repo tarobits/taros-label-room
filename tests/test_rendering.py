@@ -77,6 +77,7 @@ def test_editor_svg_embeds_used_font_glyphs_without_changing_print_output(weight
     data = base64.b64decode(encoded[0])
     with TTFont(io.BytesIO(data)) as font:
         characters = font.getBestCmap()
+        assert characters is not None
         assert all(ord(character) in characters for character in "Äg 42")
         assert ord("Z") not in characters
     assert len(data) < 30000
