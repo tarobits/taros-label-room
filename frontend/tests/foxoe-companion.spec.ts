@@ -44,6 +44,26 @@ async function ready(page: Page, id: string) {
     .poll(async () => (await current(page))?.buttons.some((b) => b?.id === id && !b.disabled))
     .toBe(true)
 }
+function packingBatch(index: number, state = 'printed') {
+  return {
+    id: `batch-${index}`,
+    state,
+    created_at: 1794390000 - index,
+    process_names: [`Run ${index}`],
+    items: Array.from({ length: 12 }, (_, position) => ({
+      copy_id: `batch-${index}-copy-${position}`,
+      job_id: `job-${position}`,
+      position,
+      outcome: 'printed',
+      process_name: `Label ${position}`,
+      width_mm: 24,
+      length_mm: 60,
+      attribution: {
+        requested_by: { id: position % 2 ? 'alice' : 'zoe', name: position % 2 ? 'Alice' : 'Zoe' },
+      },
+    })),
+  }
+}
 async function fixture(page: Page, many = false) {
   const printers = Array.from({ length: many ? 14 : 2 }, (_, i) => ({
     local_id: `local-${i}`,
@@ -79,6 +99,10 @@ async function fixture(page: Page, many = false) {
     shortage: false,
     queue: false,
     queueCopy: 'copy-1',
+    packingBatches: [] as ReturnType<typeof packingBatch>[],
+    packingPages: [] as number[],
+    failPackingOffset: -1,
+    packingWait: Promise.resolve(),
   }
   await page.addInitScript(() => {
     // Plain HTTP LAN origins lack randomUUID, but the companion supports them.
@@ -124,6 +148,7 @@ async function fixture(page: Page, many = false) {
             : {
                 id: 'alice',
                 username: 'Alice',
+                language: state.language,
                 permissions: [],
                 location_id: 'local',
                 groups: {},
@@ -207,7 +232,33 @@ async function fixture(page: Page, many = false) {
           : [],
       })
     } else if (path === '/api/proxy/batches/page') {
-      await route.fulfill({ json: { items: [], total: 0, before: 0 } })
+      const query = new URL(route.request().url()).searchParams
+      const offset = Number(query.get('offset'))
+      state.packingPages.push(offset)
+      if (offset) expect(query.get('before')).toBe('1794391000')
+      await state.packingWait
+      if (offset === state.failPackingOffset) {
+        state.failPackingOffset = -1
+        await route.fulfill({ status: 422, json: { detail: 'Batch page failed' } })
+      } else
+        await route.fulfill({
+          json: {
+            items: state.packingBatches.slice(offset, offset + 20),
+            total: state.packingBatches.length,
+            before: 1794391000,
+          },
+        })
+    } else if (/^\/api\/proxy\/batches\/[^/]+$/.test(path)) {
+      const batch = state.packingBatches.find((item) => path.endsWith(`/${item.id}`))
+      await route.fulfill({ json: batch })
+    } else if (path.endsWith('/preview')) {
+      await route.fulfill({
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=',
+          'base64',
+        ),
+      })
     } else if (path === '/api/proxy/cartridges') {
       await route.fulfill({
         json: [
@@ -489,7 +540,7 @@ test('printer quick controls share handlers, recover after failure and reject st
   await ready(page, 'hold')
   await expect
     .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'hold')?.label)
-    .toBe('Resume printer')
+    .toBe('Resume')
   expect((await current(page))!.buttons.find((b) => b?.id === 'hold')?.icon).toBe('play')
   expect((await current(page))!.buttons.find((b) => b?.id === 'hold')?.iconColor).toBe('#4ade80')
   await press(page, 'hold', beforeHold)
@@ -704,9 +755,14 @@ test('queue and packing shortcuts open the touchscreen views; clearing requires 
   await press(page, 'pack')
   await expect(page.locator('.station-packing h2')).toBeFocused()
   await expect
-    .poll(async () => (await current(page))!.buttons.every((b) => !b || b.disabled))
+    .poll(async () =>
+      (await current(page))!.buttons
+        .filter((b) => b && !['back', 'lock'].includes(b.id))
+        .every((b) => b!.disabled),
+    )
     .toBe(true)
-  await page.getByRole('button', { name: 'Back to printers', exact: true }).click()
+  await ready(page, 'back')
+  await press(page, 'back')
   await ready(page, 'clear-block')
   await press(page, 'clear-block')
   const dialog = page.getByRole('dialog')
@@ -726,4 +782,157 @@ test('queue and packing shortcuts open the touchscreen views; clearing requires 
   await expect
     .poll(async () => (await current(page))!.buttons.some((b) => b?.id === 'clear-block'))
     .toBe(false)
+})
+
+test('German deck labels stay compact and revoked packing access rejects old keys', async ({
+  page,
+}) => {
+  const state = await fixture(page)
+  state.language = 'de'
+  state.locked = false
+  state.permissions.push(
+    'printer.view_activity',
+    'printer.start_own',
+    'printer.hold_resume',
+    'printer.review',
+  )
+  state.stopPolicy = { after_current: true, emergency: true }
+  state.printers[0].can_stop = true
+  state.printers[0].blocked = true
+  state.packingBatches = [packingBatch(0), packingBatch(1)]
+  await refreshStation(page)
+  await ready(page, 'printer.0')
+  await press(page, 'printer.0')
+  await ready(page, 'pack')
+  await expect
+    .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'print')?.label)
+    .toBe('Druck 0')
+  await test.info().attach('foxoe-controls-de.json', {
+    body: JSON.stringify(await current(page)),
+    contentType: 'application/json',
+  })
+  await press(page, 'pack')
+  await ready(page, 'run-next')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'run-next')?.label).toBe(
+    'Nächster\nLauf',
+  )
+  await test.info().attach('foxoe-packing-de.json', {
+    body: JSON.stringify(await current(page)),
+    contentType: 'application/json',
+  })
+  const old = (await current(page))!.id
+  state.permissions = state.permissions.filter((p) => p !== 'printer.view_activity')
+  await refreshStation(page)
+  await expect(page.locator('.station-packing')).toHaveCount(0)
+  await expect
+    .poll(async () => (await current(page))!.buttons.some((b) => b?.id === 'pack'))
+    .toBe(false)
+  const requests = state.packingPages.length
+  await press(page, 'run-next', old)
+  await press(page, 'order-requester', old)
+  expect(state.packingPages).toHaveLength(requests)
+  await ready(page, 'back')
+  await press(page, 'back')
+  await ready(page, 'printer.0')
+})
+
+test('packing deck navigates completed runs across pages, sorts, scrolls and returns during a pending request', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 600 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const state = await fixture(page)
+  state.locked = false
+  state.permissions.push('printer.view_activity')
+  state.packingBatches = Array.from({ length: 41 }, (_, i) =>
+    packingBatch(i, [0, 19, 40].includes(i) ? 'printed' : i % 2 ? 'printing' : 'needs_review'),
+  )
+  await refreshStation(page)
+  await ready(page, 'printer.0')
+  await press(page, 'printer.0')
+  await ready(page, 'pack')
+  await press(page, 'pack')
+  await ready(page, 'order-requester')
+  const batchSelect = page.locator('.packing-batches select')
+  const sortSelect = page.getByRole('combobox', { name: 'Sort by', exact: true })
+  await expect(batchSelect).toHaveValue('batch-0')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'run-previous')?.disabled).toBe(true)
+  await press(page, 'run-previous')
+  await expect(batchSelect).toHaveValue('batch-0')
+  await press(page, 'order-requester')
+  await expect(sortSelect).toHaveValue('requester')
+  await expect(page.locator('.packing-label h2').first()).toHaveText('Alice')
+  await ready(page, 'order-print')
+  await press(page, 'order-print')
+  await expect(sortSelect).toHaveValue('print')
+  await expect(page.locator('.packing-label h2').first()).toHaveText('Zoe')
+  await sortSelect.selectOption('requester')
+  await ready(page, 'order-print')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'order-requester')?.disabled).toBe(
+    true,
+  )
+  await press(page, 'scroll-down')
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  const scrolled = await page.evaluate(() => window.scrollY)
+  await press(page, 'scroll-up')
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeLessThan(scrolled)
+  await test.info().attach('foxoe-packing.json', {
+    body: JSON.stringify(await current(page)),
+    contentType: 'application/json',
+  })
+  const old = (await current(page))!.id
+  await press(page, 'run-next')
+  await press(page, 'run-next', old)
+  await expect(batchSelect).toHaveValue('batch-19')
+  await expect(sortSelect).toHaveValue('print')
+  state.failPackingOffset = 40
+  await ready(page, 'run-next')
+  await press(page, 'run-next')
+  await expect(page.getByRole('alert')).toContainText('Batch page failed')
+  await expect(batchSelect).toHaveValue('batch-19')
+  await ready(page, 'run-next')
+  await press(page, 'run-next')
+  await expect(batchSelect).toHaveValue('batch-40')
+  await ready(page, 'run-previous')
+  expect((await current(page))!.buttons.find((b) => b?.id === 'run-next')?.disabled).toBe(true)
+  await press(page, 'run-previous')
+  await expect(batchSelect).toHaveValue('batch-19')
+  expect(state.packingPages).toContain(20)
+  expect(state.packingPages).toContain(40)
+  state.packingBatches[40]!.state = 'printing'
+  await ready(page, 'run-next')
+  await press(page, 'run-next')
+  await expect
+    .poll(async () => (await current(page))!.buttons.find((b) => b?.id === 'run-next')?.disabled)
+    .toBe(true)
+  await expect(batchSelect).toHaveValue('batch-19')
+  await ready(page, 'run-previous')
+  await press(page, 'run-previous')
+  await expect(batchSelect).toHaveValue('batch-0')
+  state.packingBatches[40]!.state = 'printed'
+  await ready(page, 'run-next')
+  await press(page, 'run-next')
+  await expect(batchSelect).toHaveValue('batch-19')
+  let release!: () => void
+  state.packingWait = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  try {
+    await ready(page, 'run-next')
+    const requests = state.packingPages.length
+    await press(page, 'run-next')
+    await expect.poll(() => state.packingPages.length).toBeGreaterThan(requests)
+    await ready(page, 'back')
+    await press(page, 'back')
+    await ready(page, 'pack')
+    release()
+    await expect(page.locator('.station-packing')).toHaveCount(0)
+    await press(page, 'pack')
+    await ready(page, 'order-requester')
+    await press(page, 'lock')
+    await ready(page, 'unlock')
+    await expect(page.locator('.station-packing')).toHaveCount(0)
+  } finally {
+    release()
+  }
 })

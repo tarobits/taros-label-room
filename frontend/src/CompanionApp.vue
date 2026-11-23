@@ -151,6 +151,7 @@ const cartridgeId = ref(''),
   copyIds = ref<string[]>([])
 const jobs = computed(() => queueGroups.value.flatMap((group) => group.jobs))
 const packingPrinter = ref<LocalPrinter | null>(null)
+const packingView = ref<InstanceType<typeof CompanionPacking>>()
 const queuePage = ref(0),
   hasNextPage = ref(false)
 const config = ref<
@@ -481,8 +482,7 @@ const deckScreen = computed<DeckScreen>(() => {
     busy.value ||
     otherDialog.value ||
     !!config.value ||
-    adding.value ||
-    !!packingPrinter.value
+    adding.value
   function button(
     id: string,
     label: string,
@@ -585,7 +585,7 @@ const deckScreen = computed<DeckScreen>(() => {
         ...digits.slice(0, 3),
         button(
           'backspace',
-          t('pinEntry.backspace'),
+          t('companionDeck.backspace'),
           'backspace',
           () => pinEntry.value?.press('backspace'),
           !pin.value.length,
@@ -621,6 +621,78 @@ const deckScreen = computed<DeckScreen>(() => {
     false,
     true,
   )
+  if (packingPrinter.value) {
+    const view = packingView.value
+    return {
+      context: JSON.stringify([
+        'packing',
+        station.value.user?.id,
+        packingPrinter.value.local_id,
+        view?.selected,
+        view?.page,
+        view?.order,
+      ]),
+      buttons: [
+        button(
+          'run-previous',
+          t('companionDeck.previousRun'),
+          'arrow-left',
+          () => void view?.moveRun(-1),
+          !view?.canPrevious,
+        ),
+        button(
+          'run-next',
+          t('companionDeck.nextRun'),
+          'arrow-right',
+          () => void view?.moveRun(1),
+          !view?.canNext,
+        ),
+        null,
+        button(
+          'scroll-up',
+          t('companionDeck.scrollUp'),
+          'arrow-up',
+          () => view?.scroll(-1),
+          !view?.ready,
+        ),
+        button(
+          'scroll-down',
+          t('companionDeck.scrollDown'),
+          'arrow-down',
+          () => view?.scroll(1),
+          !view?.ready,
+        ),
+        button(
+          'order-requester',
+          t('companionDeck.requester'),
+          'users',
+          () => view?.setOrder('requester'),
+          !view?.ready || view.order === 'requester',
+        ),
+        button(
+          'order-print',
+          t('companionDeck.printOrder'),
+          'bars-arrow-down',
+          () => view?.setOrder('print'),
+          !view?.ready || view.order === 'print',
+        ),
+        null,
+        null,
+        null,
+        button(
+          'back',
+          t('companionDeck.back'),
+          'arrow-left',
+          () => void closePacking(),
+          false,
+          true,
+        ),
+        null,
+        null,
+        lockButton,
+      ],
+    }
+  }
   const printer = active.value
   if (printer && can(printer.id, 'view')) {
     const currentStatus = status.value
@@ -646,7 +718,7 @@ const deckScreen = computed<DeckScreen>(() => {
         canPrint
           ? button(
               'print',
-              `${t('common.printSelected')}${copyIds.value.length})`,
+              t('companionDeck.printSelected', { count: copyIds.value.length }),
               'printer',
               () => void start(),
               !operational.value ||
@@ -661,8 +733,8 @@ const deckScreen = computed<DeckScreen>(() => {
           ? button(
               'hold',
               currentStatus?.automatic_printing_held
-                ? t('uiMessages.resumePrinter')
-                : t('uiMessages.holdPrinter'),
+                ? t('companionDeck.resume')
+                : t('companionDeck.hold'),
               currentStatus?.automatic_printing_held ? 'play' : 'pause',
               () => void hold(),
               !operational.value || !currentStatus,
@@ -671,7 +743,7 @@ const deckScreen = computed<DeckScreen>(() => {
         canPrint
           ? button(
               'print-tape',
-              t('companionApp.printTapeQueue'),
+              t('companionDeck.printTapeQueue'),
               'rectangle-stack',
               () => void printProfileQueue(),
               !operational.value ||
@@ -685,7 +757,7 @@ const deckScreen = computed<DeckScreen>(() => {
         allowStop(printer, 'after_current')
           ? button(
               'stop',
-              t('common.stopAfterLabel'),
+              t('companionDeck.stopAfterLabel'),
               'stop-circle',
               () => void stop(printer, 'after_current'),
               false,
@@ -695,7 +767,7 @@ const deckScreen = computed<DeckScreen>(() => {
         allowStop(printer, 'emergency')
           ? button(
               'emergency',
-              t('common.emergencyStop'),
+              t('companionDeck.emergencyStop'),
               'hand-raised',
               () => void stop(printer, 'emergency'),
               false,
@@ -704,7 +776,7 @@ const deckScreen = computed<DeckScreen>(() => {
           : null,
         button(
           'queue',
-          t('companionApp.showQueue'),
+          t('companionDeck.showQueue'),
           'queue-list',
           () => {
             void nextTick(() => {
@@ -721,7 +793,7 @@ const deckScreen = computed<DeckScreen>(() => {
         can(printer.id, 'view_activity')
           ? button(
               'pack',
-              t('companionApp.packLabels'),
+              t('companionDeck.packLabels'),
               'archive-box',
               () => void openPacking(printer),
               !operational.value,
@@ -730,7 +802,7 @@ const deckScreen = computed<DeckScreen>(() => {
         printer.blocked && can(printer.id, 'review')
           ? button(
               'clear-block',
-              t('common.clearBlock'),
+              t('companionDeck.clearBlock'),
               'shield-check',
               () => void clearBlock(),
               !operational.value || !currentStatus || !!currentStatus.needs_review.length,
@@ -740,7 +812,7 @@ const deckScreen = computed<DeckScreen>(() => {
         null,
         button(
           'back',
-          t('companionPacking.backToPrinters'),
+          t('companionDeck.back'),
           'arrow-left',
           () => openControls(printer),
           false,
@@ -1124,6 +1196,7 @@ function changePage(delta: number) {
     >
     <MotionSurface :identity="packingPrinter?.local_id ?? 'printers'">
       <CompanionPacking
+        ref="packingView"
         v-if="packingPrinter?.id && operational && can(packingPrinter.id, 'view_activity')"
         :key="`${station?.user?.id}:${packingPrinter.id}`"
         :printer-id="packingPrinter.id"

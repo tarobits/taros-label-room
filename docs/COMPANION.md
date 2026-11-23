@@ -145,8 +145,12 @@ companion page; normal touch and keyboard controls remain available without it.
    the touchscreen's destination and existing print checks. **Show queue** brings
    that printer's queue into view on the touchscreen. **Pack labels** opens its
    packing screen; **Clear block** opens the existing confirmation when permitted.
-4. **Back to printers** returns to the printer list. Lists longer than eleven
-   printers have Previous and Next keys. **Lock** is available on both screens,
+4. Packing has **Prev. run** and **Next run** keys for completed runs, including
+   across pages, **Up/Down** for scrolling, and **Requester/Print order** for
+   sorting. Sorting stays synchronized with the touchscreen. **Back** returns
+   to the printer controls, including while a run is loading.
+5. From printer controls, **Back** returns to the printer list. Lists longer than eleven
+   printers have Previous and Next keys. **Lock** is available on all these screens,
    immediately to the left of **Home**, which FoxOE supplies as key 15.
 
 PIN input uses the companion's existing validation, length limit, masking, and
@@ -155,7 +159,7 @@ PIN as a label or value. Touch and deck input share the same field, including
 backspace and clear. Failed unlock attempts clear the field as usual.
 
 Actions are disabled while the companion is busy or unreachable, or another dialog
-or packing view is open. When only the main server is offline, local locking and
+is open. When only the main server is offline, local locking and
 stopping remain available according to the station's existing stop policy; printing
 and hold/resume are disabled. Old layouts and disconnected key presses are ignored.
 Reconnecting restores the current screen. Printer selection counts as activity
@@ -164,10 +168,10 @@ for the existing inactivity lock; merely connecting the deck does not.
 This integration uses dynamic layouts and needs no registration credential in
 the companion, no connection to FoxOE's network registration port, and no browser
 access to its loopback API. The FoxOE app entry and extension pairing are required.
-Queue selection, packing interactions, cartridge management, configuration and
+Queue selection, cartridge management, configuration and
 confirmations remain on the touchscreen.
-The companion uses Heroicons for actions, including lock, user, pause/resume,
-stop and emergency stop. PIN digits use large text-only keys (`icon: null`,
+The companion uses Heroicons with short, two-line labels sized for the physical
+keys. Full action names remain on the touchscreen. PIN digits use large text-only keys (`icon: null`,
 `textSize: 32`). This requires FoxOE's Heroicons catalog, nullable button icons,
 text-size support, and key colors. Print/resume icons are green, hold/stop-after-label
 icons amber, and emergency stop red; key backgrounds and text retain FoxOE's defaults.

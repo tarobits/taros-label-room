@@ -2864,6 +2864,25 @@
     "hiddenFontsRemainAvailableToSavedLabels": "Ausgeblendete Schriften bleiben für gespeicherte Etiketten verfügbar.",
     "kb": "KB"
   },
+  "companionDeck": {
+    "back": "Zurück",
+    "backspace": "Korrektur",
+    "clearBlock": "Freigeben",
+    "emergencyStop": "Not-Aus",
+    "hold": "Pause",
+    "nextRun": "Nächster\nLauf",
+    "packLabels": "Packen",
+    "previousRun": "Vorheriger\nLauf",
+    "printOrder": "Druckfolge",
+    "printSelected": "Druck {count}",
+    "printTapeQueue": "Band-\nAufträge",
+    "requester": "Besteller",
+    "resume": "Weiter",
+    "scrollDown": "Runter",
+    "scrollUp": "Hoch",
+    "showQueue": "Aufträge",
+    "stopAfterLabel": "Nach Etikett"
+  },
   "companionPacking": {
     "backToPrinters": "Zu den Druckern",
     "batch": "Druckstapel",

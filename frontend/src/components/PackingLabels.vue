@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { t } from '../shared/i18n'
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import type { BatchDetail } from '../shared/types'
 import JobPreview from './JobPreview.vue'
 import { freezeLeavingItem } from '../shared/collectionMotion'
 const props = withDefaults(defineProps<{ batch: BatchDetail; apiPrefix?: string }>(), {
   apiPrefix: '',
 })
-const order = ref('print')
+const order = defineModel<'print' | 'requester'>('order', { default: 'print' })
 const complete = computed(() => !['printing', 'needs_review'].includes(props.batch.state))
 const groups = computed(() => {
   const result: {

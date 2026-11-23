@@ -2864,6 +2864,25 @@
     "hiddenFontsRemainAvailableToSavedLabels": "Hidden fonts remain available to saved labels.",
     "kb": "KB"
   },
+  "companionDeck": {
+    "back": "Back",
+    "backspace": "Delete",
+    "clearBlock": "Unblock",
+    "emergencyStop": "Stop now",
+    "hold": "Hold",
+    "nextRun": "Next run",
+    "packLabels": "Pack",
+    "previousRun": "Prev. run",
+    "printOrder": "Print order",
+    "printSelected": "Print {count}",
+    "printTapeQueue": "Tape queue",
+    "requester": "Requester",
+    "resume": "Resume",
+    "scrollDown": "Down",
+    "scrollUp": "Up",
+    "showQueue": "Queue",
+    "stopAfterLabel": "After label"
+  },
   "companionPacking": {
     "backToPrinters": "Back to printers",
     "batch": "Batch",
