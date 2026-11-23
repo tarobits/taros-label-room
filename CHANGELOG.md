@@ -2,6 +2,23 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-pre2] - 2026-11-23
+
+### Added
+
+- FoxOE printer quick controls for printing the touchscreen selection, holding
+  or resuming automatic printing, stopping after a label, and emergency stopping.
+  Actions respect existing permissions, printer state, and print confirmations.
+- Station locking and Back to printers controls on the Stream Deck. Local locking
+  and permitted stop actions remain available when the main server is offline.
+
+### Changed
+
+- Selecting a printer now opens its deck controls. Printer lists show eleven
+  entries per page to keep Lock beside FoxOE's reserved Home key.
+- Clarified where to enter FoxOE's browser connection token and how to use the
+  companion's deck controls.
+
 ## [0.23.0-pre1] - 2026-11-23
 
 ### Added
