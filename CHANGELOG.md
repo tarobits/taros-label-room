@@ -2,6 +2,33 @@
 
 Release notes before 0.21.0 are retained as unlinked history; their repository and tags were removed.
 
+## [0.23.0-preview.6] - 2026-11-25
+
+### Added
+
+- PT-P710BT Bluetooth printing on native Linux and Raspberry Pi, with local
+  discovery and pairing in the main admin and companion interfaces.
+- Switch existing printers between USB and Bluetooth while keeping queued labels,
+  history, groups, and cartridge assignments. Active printing and unresolved
+  investigations prevent switching.
+- Configurable update-backup retention with `LABEL_UPDATE_BACKUP_KEEP`, defaulting
+  to five completed backups. Failed and incomplete recovery records remain protected.
+
+### Changed
+
+- Installers, updaters, and update notices share semantic-version release selection
+  and remember each installation's stable or beta channel. Switching to stable
+  waits for a newer stable release without downgrading.
+- Preview versions now use numeric identifiers such as `preview.6` so later
+  previews remain correctly ordered.
+
+**Bluetooth requirements:** Existing Linux installations need BlueZ and a powered
+Bluetooth adapter; see [host setup](docs/DEPLOYMENT.md#bluetooth-printers-on-native-linux).
+Both main server and companion need this version for companion Bluetooth printing.
+Older companions reject Bluetooth batches before execution. Physical Bluetooth
+printing still requires verification on the target hardware; macOS, Windows,
+and container Bluetooth are not supported.
+
 ## [0.23.0-pre5] - 2026-11-23
 
 ### Added
@@ -1270,5 +1297,6 @@ Initial release of Label Printer Server.
 **Printing limitation:** Cancellation may finish the current label before stopping
 subsequent labels.
 
+[0.23.0-preview.6]: https://github.com/tarobits/taros-label-room/compare/v0.23.0-pre5...v0.23.0-preview.6
 [0.22.0]: https://github.com/tarobits/taros-label-room/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/tarobits/taros-label-room/tree/v0.21.0
