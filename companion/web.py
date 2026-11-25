@@ -25,6 +25,7 @@ from app import __version__
 from app.companion.companion_protocol import OperatorLanguage
 from app.deployment import require_role
 from app.i18n import Message, error_detail, render, request_language, validation_details
+from app.maintenance.release_policy import channel_from_directory
 from app.maintenance.releases import REPOSITORY, release_version, stable_version
 from app.printer.base import ControlledPrinterBackend, StopMode
 from app.printer.messages import localize_status
@@ -41,11 +42,11 @@ PROXY_PATH = re.compile(
 PACKING_PATH = re.compile(r"batches/(?:page|[A-Za-z0-9_-]+(?:/items/[A-Za-z0-9_-]+/preview)?)")
 
 
-def available_update(value: Any) -> dict[str, str] | None:
+def available_update(value: Any, channel: str = "stable") -> dict[str, str] | None:
     if not isinstance(value, str):
         return None
     try:
-        stable_version(value)
+        (stable_version if channel == "stable" else release_version)(value)
         if release_version(value) <= release_version(__version__):
             return None
     except ValueError:
@@ -54,6 +55,16 @@ def available_update(value: Any) -> dict[str, str] | None:
         "version": value,
         "url": f"https://github.com/{REPOSITORY}/releases/tag/{quote(value, safe='')}",
     }
+
+
+def station_update(users: dict[str, Any], settings: Settings) -> dict[str, str] | None:
+    try:
+        channel = channel_from_directory(settings.data_dir)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if users.get("release_channel", "stable") != channel:
+        return None
+    return available_update(users.get("latest_release"), channel)
 
 
 def frontend_build(path: Path) -> str | None:
@@ -329,7 +340,7 @@ def create_app(
             "name": agent.users.get("name", "Companion"),
             "default_language": settings.default_language,
             "version": __version__,
-            "update": available_update(agent.users.get("latest_release"))
+            "update": station_update(agent.users, settings)
             if settings.show_update_notice
             else None,
             "frontend_build": build,

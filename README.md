@@ -72,6 +72,9 @@ rerun `update.sh` to continue.
 
 Native updates download the prebuilt frontend by default. Use `--build-frontend`
 to build it locally or `--check` to inspect the plan without making changes.
+`--channel beta` includes prereleases and remembers that choice; `--channel stable`
+returns to stable without downgrading an installed prerelease. Selection uses
+SemVer precedence, and update notices follow the installation's saved channel.
 Existing environment files receive missing defaults
 and comments without overwriting your settings; `--no-env-update` skips this.
 

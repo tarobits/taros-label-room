@@ -58,7 +58,7 @@ without a browser refresh. Print and other control requests are never replayed.
 The connection bar also shows the companion's running version, source and license
 links, and project credit. Connection status stays centered.
 
-When a newer stable release is available, a small **Update available** link appears
+When a newer release in the companion's saved channel is available, a small **Update available** link appears
 beside the station summary, including while locked. The companion compares its own
 version with the main server's cached GitHub release check; it does not contact
 GitHub separately. Set `LABEL_COMPANION_SHOW_UPDATE_NOTICE=false` to hide it.

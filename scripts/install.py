@@ -49,6 +49,14 @@ def options(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--install-dir", type=Path, default=Path("/opt/labels"))
     parser.add_argument("--role", choices=("main", "companion"), default="main")
     parser.add_argument(
+        "--channel",
+        choices=("stable", "beta"),
+        default="stable",
+        help=update.tr(
+            "messages.releaseChannelStableDefaultOrNewestPublicationIncludingPrereleases"
+        ),
+    )
+    parser.add_argument(
         "--database-url-file",
         type=Path,
         help=update.tr("messages.mainOnlyPrivateFileContainingTheMariaDBDatabaseURL"),
@@ -453,8 +461,12 @@ def install(args: argparse.Namespace) -> None:
     if args.github_token_file:
         args.github_token_file = args.github_token_file.resolve()
     token = update.installation_token(args)
-    ref = args.ref or update.latest_release(repository, token)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ref):
+    ref = args.ref or (
+        update.beta_release(repository, token)
+        if args.channel == "beta"
+        else update.latest_release(repository, token)
+    )
+    if not update.valid_tag(ref):
         raise update.UpdateError(update.tr("messages.unsupportedReleaseTagName"))
     print(
         update.tr(
@@ -573,6 +585,14 @@ def install(args: argparse.Namespace) -> None:
         with os.fdopen(descriptor, "w") as file:
             file.write(config)
         (target / update.ROLE_MARKER).write_text(args.role + "\n")
+        try:
+            update.release_policy().release_version(ref)
+        except ValueError:
+            pass  # Explicit development branch installations have no release identity yet.
+        else:
+            state = json.dumps({"schema": 1, "channel": args.channel, "version": ref}).encode()
+            update.atomic_state(target / update.CHANNEL_STATE, state)
+            update.atomic_state((companion_data or data) / update.CHANNEL_STATE, state)
         own_tree(target, user.pw_uid, user.pw_gid)
         build_env = {
             "PATH": SAFE_PATH,

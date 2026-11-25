@@ -3,7 +3,7 @@
 import json
 import secrets
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Request, Response
 from pydantic import Field, SecretStr
@@ -413,7 +413,9 @@ def set_pin(body: PinInput, request: Request, session: DB) -> dict[str, bool]:
 
 
 @router.get("/companion/users")
-def station_users(request: Request, session: DeviceDB) -> dict[str, Any]:
+def station_users(
+    request: Request, session: DeviceDB, channel: Literal["stable", "beta"] = "stable"
+) -> dict[str, Any]:
     item: Companion = session.info["companion"]
     users = []
     for user in session.scalars(
@@ -436,7 +438,8 @@ def station_users(request: Request, session: DeviceDB) -> dict[str, Any]:
         "location_id": item.location_id,
         "bound_user_id": item.bound_user_id,
         "users": users,
-        "latest_release": request.app.state.releases.status()["latest_version"],
+        "latest_release": request.app.state.release_channels[channel].status()["latest_version"],
+        "release_channel": channel,
     }
 
 

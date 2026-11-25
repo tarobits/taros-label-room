@@ -116,6 +116,31 @@ def test_read_only_check_resolves_stable_release_without_installing(installer, m
     assert calls == health == []
 
 
+@pytest.mark.parametrize("check", [False, True])
+def test_beta_install_selects_semver_and_remembers_channel_in_both_locations(
+    installer, monkeypatch, check
+):
+    import json
+
+    args, calls, health, units, _, _ = installer
+    args.check, args.ref, args.channel = check, None, "beta"
+    version = "v2.0.0-preview.10+build.2"
+    monkeypatch.setattr(update, "beta_release", lambda repository, token: version)
+    monkeypatch.setattr(update, "latest_release", lambda *args: pytest.fail("wrong channel"))
+    install.install(args)
+    if check:
+        assert not args.install_dir.exists()
+        assert calls == health == []
+        assert list(units.iterdir()) == []
+    else:
+        for directory in (args.install_dir, args.install_dir / "data"):
+            assert json.loads((directory / update.CHANNEL_STATE).read_text()) == {
+                "schema": 1,
+                "channel": "beta",
+                "version": version,
+            }
+
+
 def test_existing_installation_and_service_are_never_overwritten(installer):
     args, calls, _, units, _, _ = installer
     args.install_dir.mkdir()

@@ -21,6 +21,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +44,8 @@ MAX_FRONTEND_DOWNLOAD = 64 * 1024 * 1024
 MAX_FRONTEND_UNPACKED = 256 * 1024 * 1024
 UPDATE_MARKER = ".update-in-progress"
 DEPLOYMENT_LANGUAGE_BUNDLE = "lang/deployment.json"
+RELEASE_POLICY_FILE = "app/maintenance/release_policy.py"
+CHANNEL_STATE = ".label-release-channel.json"
 _deployment_root = Path(__file__).resolve().parents[1]
 _deployment_language = "en"
 _deployment_messages: dict[str, Any] | None = None
@@ -425,7 +429,27 @@ def handoff_updater(args: argparse.Namespace, commit: str, tag: str) -> bool:
         deployment_catalog(bundle_source)
         if bundle_target.is_symlink() or bundle_target.parent.is_symlink():
             raise UpdateError(tr("messages.deploymentLanguageBundleMustNotBeASymlink"))
-    if source == target.read_text().strip() and (
+    policy_target = target.parent.parent / RELEASE_POLICY_FILE
+    policy_source = None
+    if "RELEASE_POLICY_FILE =" in source:
+        policy_source = command(
+            ["git", "show", f"{commit}:{RELEASE_POLICY_FILE}"], args.checkout, capture=True
+        )
+        if not policy_source or len(policy_source.encode()) > 64 * 1024:
+            raise UpdateError(tr("messages.releasePolicyMissing"))
+        compile(policy_source, RELEASE_POLICY_FILE, "exec")
+        if policy_target.is_symlink() or any(
+            p.is_symlink() for p in (policy_target.parent, policy_target.parent.parent)
+        ):
+            raise UpdateError(tr("messages.releasePolicyMissing"))
+    if (
+        source == target.read_text().strip()
+        and (
+            policy_source is None
+            or policy_target.is_file()
+            and policy_target.read_text().strip() == policy_source
+        )
+    ) and (
         bundle_source is None
         or bundle_target.is_file()
         and bundle_target.read_text().strip() == bundle_source
@@ -448,6 +472,10 @@ def handoff_updater(args: argparse.Namespace, commit: str, tag: str) -> bool:
     descriptor, replacement = tempfile.mkstemp(prefix=".update-", dir=target.parent)
     bundle_replaced = False
     bundle_replacement = None
+    policy_replaced = False
+    previous_policy = policy_target.read_bytes() if policy_target.is_file() else None
+    if previous_policy is not None:
+        Path(filename + ".policy").write_bytes(previous_policy)
     try:
         with os.fdopen(descriptor, "w") as output:
             output.write(source + "\n")
@@ -466,8 +494,16 @@ def handoff_updater(args: argparse.Namespace, commit: str, tag: str) -> bool:
             os.chmod(bundle_replacement, 0o644)
             os.replace(bundle_replacement, bundle_target)
             bundle_replaced = True
+        if policy_source is not None:
+            atomic_state(policy_target, (policy_source + "\n").encode())
+            policy_replaced = True
         os.replace(replacement, target)
     except BaseException:
+        if policy_replaced:
+            if previous_policy is None:
+                policy_target.unlink(missing_ok=True)
+            else:
+                atomic_state(policy_target, previous_policy)
         if bundle_replaced:
             if previous_bundle is None:
                 bundle_target.unlink()
@@ -506,6 +542,8 @@ def handoff_updater(args: argparse.Namespace, commit: str, tag: str) -> bool:
         str(args.backup_dir),
         "--tag",
         tag,
+        "--channel",
+        args.channel,
         "--mode",
         args.mode,
     ]
@@ -517,6 +555,10 @@ def handoff_updater(args: argparse.Namespace, commit: str, tag: str) -> bool:
 
 
 class UpdateError(Exception):
+    pass
+
+
+class NoRelease(UpdateError):
     pass
 
 
@@ -704,6 +746,46 @@ def release_request(repository: str, path: str, token: str | None = None) -> Any
         raise UpdateError(tr("messages.couldNotReadGitHubReleaseInformation")) from error
 
 
+def release_policy():
+    """Bootstrap a missing helper from the Git object matching this updater.
+
+    Older updaters copy only this script and its language bundle. No live app
+    imports, writes or downloads are needed, including during --check.
+    """
+    root = Path(__file__).resolve().parents[1]
+    target = root / RELEASE_POLICY_FILE
+    if target.is_file() and not target.is_symlink():
+        source = target.read_text()
+    else:
+        source = None
+        for reference in ("FETCH_HEAD", "HEAD"):
+            try:
+                matching = subprocess.check_output(
+                    ["git", "show", f"{reference}:scripts/update.py"],
+                    cwd=root,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                if matching.strip() != Path(__file__).read_text().strip():
+                    continue
+                source = subprocess.check_output(
+                    ["git", "show", f"{reference}:{RELEASE_POLICY_FILE}"],
+                    cwd=root,
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+                break
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if source is None:
+            raise UpdateError(tr("messages.releasePolicyMissing"))
+    module = types.ModuleType("label_release_policy")
+    exec(compile(source, RELEASE_POLICY_FILE, "exec"), module.__dict__)
+    return module
+
+
 def valid_tag(tag: str) -> bool:
     return bool(
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+\-]*", tag)
@@ -728,44 +810,33 @@ def release_tag(release: Any, *, stable: bool = False) -> str:
     return tag
 
 
+def selected_release(repository: str, channel: str, token: str | None = None) -> str:
+    policy = release_policy()
+    try:
+        return policy.select_release(
+            lambda page: release_request(repository, f"?per_page=100&page={page}", token), channel
+        )
+    except policy.NoEligibleRelease as error:
+        raise NoRelease(tr("messages.noEligibleSemverRelease")) from error
+    except ValueError as error:
+        raise UpdateError(tr("messages.noEligibleSemverRelease")) from error
+
+
 def latest_release(repository: str, token: str | None = None) -> str:
-    return release_tag(release_request(repository, "/latest", token), stable=True)
+    return selected_release(repository, "stable", token)
 
 
 def beta_release(repository: str, token: str | None = None) -> str:
-    """Newest publication across stable and prerelease releases, excluding drafts."""
-    newest: tuple[datetime, bool, str] | None = None
-    page = 1
-    while True:
-        releases = release_request(repository, f"?per_page=100&page={page}", token)
-        if not isinstance(releases, list):
-            raise UpdateError(tr("messages.githubDidNotReturnAReleaseList"))
-        for release in releases:
-            if isinstance(release, dict) and release.get("draft"):
-                continue
-            tag = release_tag(release)
-            try:
-                published = datetime.fromisoformat(release["published_at"])
-                if published.utcoffset() is None:
-                    raise ValueError("Missing timezone")
-            except (KeyError, TypeError, ValueError) as error:
-                raise UpdateError(
-                    tr("messages.githubReturnedAnInvalidReleasePublicationDate")
-                ) from error
-            candidate = (published, not bool(release.get("prerelease")), tag)
-            if newest is None or candidate > newest:
-                newest = candidate
-        if len(releases) < 100:
-            break
-        page += 1
-    if newest is None:
-        raise UpdateError(tr("messages.noPublishedReleaseFoundForTheBetaChannel"))
-    return newest[2]
+    return selected_release(repository, "beta", token)
 
 
 def tagged_release(repository: str, tag: str, token: str | None = None) -> str:
     if not valid_tag(tag):
         raise UpdateError(tr("messages.invalidReleaseTag"))
+    try:
+        release_policy().release_version(tag)
+    except ValueError as error:
+        raise UpdateError(tr("messages.invalidReleaseTag")) from error
     selected = release_tag(
         release_request(repository, f"/tags/{urllib.parse.quote(tag, safe='')}", token)
     )
@@ -855,6 +926,97 @@ def config_name(args: argparse.Namespace) -> str:
     return ".env.companion" if args.role == "companion" else ".env"
 
 
+def backup_retention(args: argparse.Namespace) -> int:
+    """Read the updater-only setting without executing or interpolating .env values."""
+    key = "LABEL_UPDATE_BACKUP_KEEP"
+    value = os.environ.get(key)
+    if value is None:
+        value = "5"
+        config = args.install_dir / config_name(args)
+        if config.is_file():
+            for name, block in environment_entries(config.read_text()):
+                if name != key:
+                    continue
+                match = re.search(rf"^\s*(?:export\s+)?{key}\s*=\s*(.*)$", block, re.MULTILINE)
+                if match:
+                    try:
+                        parts = shlex.split(match[1], comments=True)
+                    except ValueError as error:
+                        raise UpdateError(tr("messages.invalidBackupRetention")) from error
+                    value = parts[0] if len(parts) == 1 else ""
+    try:
+        if not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
+            raise ValueError
+        return int(value)
+    except ValueError as error:
+        raise UpdateError(tr("messages.invalidBackupRetention")) from error
+
+
+def remove_backup(path: Path) -> None:
+    # Preserve ownership metadata until all archive data has been removed, so a
+    # partially failed cleanup remains recognizable on the next update. Pin the
+    # directory and never follow a symlink swapped in while cleanup is running.
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for name in os.listdir(descriptor):
+            if name == "update.json":
+                continue
+            if stat.S_ISDIR(os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode):
+                shutil.rmtree(name, dir_fd=descriptor)
+            else:
+                os.unlink(name, dir_fd=descriptor)
+        os.unlink("update.json", dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    path.rmdir()
+
+
+def prune_backups(args: argparse.Namespace, current: Path, keep: int) -> None:
+    """Called after activation, under the installation's existing update lock.
+
+    Only recognized updater directories belonging to this installation qualify.
+    Cleanup errors must never roll back an already activated application.
+    """
+    candidates = []
+    try:
+        children = list(args.backup_dir.iterdir())
+    except OSError:
+        print(tr("progress.backupPruneFailed", backup=args.backup_dir), file=sys.stderr)
+        return
+    for path in children:
+        if path == current or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}", path.name):
+            continue
+        try:
+            if path.is_symlink() or not path.is_dir():
+                continue
+            record = path / "update.json"
+            if record.is_symlink() or not record.is_file() or record.stat().st_size > 1024 * 1024:
+                continue
+            metadata = json.loads(record.read_text())
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("install_dir") != str(args.install_dir)
+                or metadata.get("role", "main") != args.role
+                or metadata.get("status") != "complete"
+            ):
+                continue
+            candidates.append(path)
+        except (ValueError, UnicodeError):
+            continue
+        except OSError:
+            print(tr("progress.backupPruneFailed", backup=path), file=sys.stderr)
+    removed = 0
+    # The current recovery point is retained even if the system clock moved back.
+    for path in sorted(candidates, key=lambda path: path.name, reverse=True)[keep - 1 :]:
+        try:
+            remove_backup(path)
+            removed += 1
+        except OSError:
+            print(tr("progress.backupPruneFailed", backup=path), file=sys.stderr)
+    if removed:
+        print(tr("progress.backupsPruned", count=removed, keep=keep), flush=True)
+
+
 def compose_service(args: argparse.Namespace) -> str:
     return "companion" if args.role == "companion" else "labels"
 
@@ -932,6 +1094,112 @@ def detect_mode(args: argparse.Namespace) -> str:
     raise UpdateError(tr("progress.modeAdvice", reason=reason))
 
 
+def atomic_state(path: Path, content: bytes) -> None:
+    if path.is_symlink():
+        raise UpdateError(tr("messages.invalidChannelState"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".channel-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def installed_channel(directory: Path) -> str:
+    path = directory / CHANNEL_STATE
+    try:
+        state = json.loads(path.read_text())
+        if (
+            path.is_symlink()
+            or state.get("schema") != 1
+            or state.get("channel") not in ("stable", "beta")
+        ):
+            raise ValueError
+        return state["channel"]
+    except FileNotFoundError:
+        return "stable"
+    except (ValueError, TypeError, AttributeError) as error:
+        raise UpdateError(tr("messages.invalidChannelState")) from error
+
+
+def installed_release(directory: Path) -> str | None:
+    state = directory / CHANNEL_STATE
+    if state.exists() or state.is_symlink():
+        try:
+            installed_channel(directory)
+            version = json.loads(state.read_text())["version"]
+            release_policy().release_version(version)
+            return version
+        except (OSError, KeyError, ValueError, TypeError) as error:
+            raise UpdateError(tr("messages.invalidChannelState")) from error
+    try:
+        version = tomllib.loads((directory / "pyproject.toml").read_text())["project"]["version"]
+        release_policy().release_version(version)
+        return version
+    except (FileNotFoundError, KeyError, ValueError, TypeError):
+        return None
+
+
+def channel_destination(args):
+    if args.mode == "native":
+        data, _, _ = native_configuration(args)
+        return data, None
+    return None, docker_configuration(args)
+
+
+def save_waiting_channel(args, version):
+    if not args.check:
+        lock = args.install_dir.parent / f".{args.install_dir.name}.update.lock"
+        with update_lock(lock):
+            if installed_release(args.install_dir) != version or (
+                not args.channel_explicit and installed_channel(args.install_dir) != args.channel
+            ):
+                raise UpdateError(tr("messages.installationChangedRetry"))
+            data, docker = channel_destination(args)
+            validation_marker(args, data, docker, None)
+            remember_channel(args, data, docker, version)
+    print(
+        tr(
+            "messages.channelPreview" if args.check else "messages.channelWaiting",
+            channel=args.channel,
+            version=version,
+        )
+    )
+
+
+def remember_channel(args, data, docker, version):
+    state = json.dumps({"schema": 1, "channel": args.channel, "version": version}).encode()
+    target = args.install_dir / CHANNEL_STATE
+    previous = target.read_bytes() if target.exists() else None
+    atomic_state(target, state)
+    try:
+        if data is not None:
+            atomic_state(data / CHANNEL_STATE, state)
+        else:
+            code = (
+                "import os, tempfile\nfrom pathlib import Path\n"
+                f"p=Path({str(Path('/update-data') / docker.get('data_relative', '.') / CHANNEL_STATE)!r})\n"
+                "assert not p.is_symlink()\n"
+                "fd,name=tempfile.mkstemp(prefix='.channel-',dir=p.parent)\n"
+                "try:\n"
+                f" with os.fdopen(fd,'wb') as f: f.write({state!r}); f.flush(); os.fsync(f.fileno())\n"
+                " os.chmod(name,0o644)\n os.replace(name,p)\n"
+                "finally:\n Path(name).unlink(missing_ok=True)\n"
+            )
+            docker_data_command(args, docker, code)
+    except BaseException:
+        if previous is None:
+            target.unlink(missing_ok=True)
+        else:
+            atomic_state(target, previous)
+        raise
+
+
 def options(argv: list[str] | None = None) -> argparse.Namespace:
     invocation = list(sys.argv[1:] if argv is None else argv)
     language = configure_language(invocation)
@@ -954,7 +1222,7 @@ def options(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--channel",
         choices=("stable", "beta"),
-        default="stable",
+        default=None,
         help=tr("messages.releaseChannelStableDefaultOrNewestPublicationIncludingPrereleases"),
     )
     parser.add_argument("--tag", help=tr("messages.publishedReleaseTagToInstallOverridesChannel"))
@@ -1016,6 +1284,8 @@ def options(argv: list[str] | None = None) -> argparse.Namespace:
     args.checkout = args.checkout.resolve()
     args.install_dir = (args.install_dir or args.checkout).resolve()
     args.role = deployment_role(args.install_dir)
+    args.channel_explicit = args.channel is not None
+    args.channel = args.channel or installed_channel(args.install_dir)
     args.health_url_explicit = args.health_url is not None
     args.health_url = (
         args.health_url
@@ -1695,6 +1965,7 @@ class RemoteDatabase:
 
 
 def update(args: argparse.Namespace) -> None:
+    keep_backups = backup_retention(args)
     checkout = args.checkout
     existing = (checkout / ".git").exists()
     if checkout.exists() and not existing:
@@ -1715,6 +1986,12 @@ def update(args: argparse.Namespace) -> None:
         changes = command(
             ["git", "status", "--porcelain", "--untracked-files=all"], checkout, capture=True
         )
+        # Older releases do not yet ignore this updater-owned metadata file.
+        if f"?? {CHANNEL_STATE}" in changes.splitlines():
+            installed_channel(checkout)
+            changes = "\n".join(
+                line for line in changes.splitlines() if line != f"?? {CHANNEL_STATE}"
+            )
         # Handoff changes must match the executing tools and the selected release.
         handoff_paths = {
             line.strip()[3:] if line.strip().startswith("?? ") else line.strip()[2:]
@@ -1728,6 +2005,8 @@ def update(args: argparse.Namespace) -> None:
                     "M scripts/update.py",
                     f"M {DEPLOYMENT_LANGUAGE_BUNDLE}",
                     f"?? {DEPLOYMENT_LANGUAGE_BUNDLE}",
+                    f"M {RELEASE_POLICY_FILE}",
+                    f"?? {RELEASE_POLICY_FILE}",
                 }
                 for line in changes.splitlines()
             )
@@ -1742,6 +2021,14 @@ def update(args: argparse.Namespace) -> None:
                     ).read_bytes()
                 )
             )
+            and (
+                RELEASE_POLICY_FILE not in handoff_paths
+                or (
+                    not (checkout / RELEASE_POLICY_FILE).is_symlink()
+                    and (checkout / RELEASE_POLICY_FILE).read_bytes()
+                    == (Path(__file__).resolve().parents[1] / RELEASE_POLICY_FILE).read_bytes()
+                )
+            )
             and not command(["git", "diff", "--cached", "--name-only"], checkout, capture=True)
         )
         if changes and not refreshed_updater:
@@ -1751,12 +2038,19 @@ def update(args: argparse.Namespace) -> None:
         ):
             raise UpdateError(tr("messages.checkoutMustBeTheRepositoryRoot"))
     token = installation_token(args)
-    if args.tag:
-        tag = tagged_release(repository, args.tag, token)
-    elif args.channel == "beta":
-        tag = beta_release(repository, token)
-    else:
-        tag = latest_release(repository, token) if token else latest_release(repository)
+    installed_version = installed_release(args.install_dir)
+    try:
+        if args.tag:
+            tag = tagged_release(repository, args.tag, token)
+        elif args.channel == "beta":
+            tag = beta_release(repository, token)
+        else:
+            tag = latest_release(repository, token) if token else latest_release(repository)
+    except NoRelease:
+        if args.tag or not installed_version:
+            raise
+        save_waiting_channel(args, installed_version)
+        return
     for protected in (checkout, args.install_dir):
         if args.backup_dir.is_relative_to(protected):
             raise UpdateError(tr("messages.backupDirectoryMustBeOutsideTheCheckoutAndInstallation"))
@@ -1785,6 +2079,14 @@ def update(args: argparse.Namespace) -> None:
             database=tr("progress.migrate" if args.role == "main" else "progress.preserveJournal"),
         )
     )
+    if installed_version:
+        current_order = release_policy().release_version(installed_version)
+        target_order = release_policy().release_version(tag)
+        if args.tag and target_order < current_order:
+            raise UpdateError(tr("messages.semverDowngrade"))
+        if target_order <= current_order:
+            save_waiting_channel(args, installed_version)
+            return
     if args.check:
         return
     required = ["git", "systemctl", "runuser"] if args.mode == "native" else ["git", "docker"]
@@ -1824,6 +2126,10 @@ def update(args: argparse.Namespace) -> None:
     args.backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = args.install_dir.parent / f".{args.install_dir.name}.update.lock"
     with update_lock(lock_path), ExitStack() as runtime_locks, ExitStack() as database_locks:
+        if installed_release(args.install_dir) != installed_version or (
+            not args.channel_explicit and installed_channel(args.install_dir) != args.channel
+        ):
+            raise UpdateError(tr("messages.installationChangedRetry"))
         with git_credentials(token) as git_env:
             git = ["git", "-c", "credential.helper="] if token else ["git"]
             if not existing:
@@ -1888,6 +2194,7 @@ def update(args: argparse.Namespace) -> None:
             ".env",
             ".env.companion",
             ROLE_MARKER,
+            CHANNEL_STATE,
             "data",
             ".venv",
             "frontend/node_modules",
@@ -2202,6 +2509,7 @@ def update(args: argparse.Namespace) -> None:
             wait_healthy(args.health_url, args.health_timeout)
             if not running(args):
                 raise UpdateError(tr("messages.applicationIsNotRunningAfterStartup"))
+            remember_channel(args, data, docker, tag)
             record("complete")
             # This is the commit point: once activation is attempted, a remote
             # Docker error cannot prove that printing has not already resumed.
@@ -2283,6 +2591,7 @@ def update(args: argparse.Namespace) -> None:
             except OSError:
                 print(tr("messages.couldNotSaveRecoveryStatusTheBackupIsRetained"), file=sys.stderr)
             raise
+        prune_backups(args, backup, keep_backups)
         print(tr("progress.updated", tag=tag, commit=commit[:12], backup=backup))
 
 

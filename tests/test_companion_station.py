@@ -405,7 +405,7 @@ def test_station_notifies_about_latest_release_using_its_own_version(
     from companion.web import create_app
 
     admin, _, _ = accounts
-    admin.app.state.releases.latest = "v0.15.0"
+    admin.app.state.release_channels["stable"].latest = "v0.15.0"
     monkeypatch.setattr("companion.web.__version__", "0.14.0")
     settings, agent = local_station(admin, tmp_path)
     with TestClient(create_app(settings, agent, start_agent=False)) as client:
@@ -422,6 +422,27 @@ def test_station_notifies_about_latest_release_using_its_own_version(
             assert client.get("/api/station").json()["update"] is None
         agent.users["latest_release"] = "v0.16.0"
         assert client.get("/api/station").json()["update"]["version"] == "v0.16.0"
+
+
+def test_station_channel_is_independent_and_corruption_does_not_interrupt_sync(accounts, tmp_path):
+    import json
+
+    from scripts.update import CHANNEL_STATE
+
+    admin, _, _ = accounts
+    admin.app.state.release_channels["stable"].latest = "v1.0.0"
+    admin.app.state.release_channels["beta"].latest = "v2.0.0-preview.10"
+    settings, agent = local_station(admin, tmp_path)
+    state = settings.data_dir / CHANNEL_STATE
+    state.write_text(json.dumps({"schema": 1, "channel": "beta"}))
+    agent.sync()
+    assert agent.users["release_channel"] == "beta"
+    assert agent.users["latest_release"] == "v2.0.0-preview.10"
+    state.write_text("invalid")
+    agent.sync()
+    assert agent.users["release_channel"] == "stable"
+    with TestClient(create_app(settings, agent, start_agent=False)) as client:
+        assert client.get("/api/station").json()["update"] is None
 
 
 @pytest.mark.parametrize("mode", ["none", "once", "each_keypress"])

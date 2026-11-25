@@ -97,6 +97,22 @@ SQLite database. Main and companion run on separate machines. Use
 
 ### Release frontend builds
 
+Installer, updater and notification checks share the dependency-free SemVer
+policy in `app/maintenance/release_policy.py`. Stable selection checks both the
+tag and GitHub's prerelease flag; beta includes both kinds. Build metadata does
+not create a newer version. Keep parsing and selection in this shared module and
+cover pagination, malformed metadata, channel switches and stale in-flight
+responses when changing it.
+
+Future prereleases use a separate numeric identifier: the successor to
+`v0.23.0-pre5` is `v0.23.0-preview.6`, then `preview.7`, and so on. Do not publish
+`pre10`: SemVer orders that before `pre9`. Keep the Git tag, `app/__init__.py`,
+`pyproject.toml`, frontend package/lock versions and changelog consistent.
+Existing tags remain unchanged. Use patch for compatible fixes, minor for
+features, and explicitly call out incompatible changes and migration requirements;
+while below 1.0, document the compatibility impact of each minor release.
+Release preparation still requires explicit authorization to commit, tag or publish.
+
 The `Release frontend` GitHub Actions workflow builds each published stable or
 prerelease tag and uploads `label-server-frontend.zip` and
 `label-companion-frontend.zip` directly to that release. The updater selects the
@@ -131,7 +147,7 @@ files (example tag):
 ```sh
 npm ci --prefix frontend
 npm run build --prefix frontend
-python3 -m scripts.package_frontend --tag v0.12.0-pre5
+python3 -m scripts.package_frontend --tag v0.23.0-preview.6
 ```
 
 The frontend overrides Workbox's `glob` dependency to 14.0.3 or newer to include

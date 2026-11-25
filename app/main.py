@@ -234,6 +234,9 @@ def create_app(
 
     releases = ReleaseChecker(settings)
     app.state.releases = releases
+    app.state.release_channels = {
+        channel: ReleaseChecker(settings, channel=channel) for channel in ("stable", "beta")
+    }
     app.state.access_policy = None
     app.state.auth_limiter = AuthRateLimiter()
     app.state.fonts = fonts

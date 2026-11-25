@@ -144,7 +144,15 @@ class Agent:
             self._sync()
 
     def _sync(self) -> None:
-        self.users = self.request("GET", "/api/companion/users").json()
+        from app.maintenance.release_policy import channel_from_directory
+
+        try:
+            channel = channel_from_directory(self.settings.data_dir)
+        except (OSError, ValueError, TypeError, AttributeError):
+            # Invalid notice metadata must not interrupt printing or journal sync.
+            # The station UI suppresses notices until the metadata is repaired.
+            channel = "stable"
+        self.users = self.request("GET", "/api/companion/users", params={"channel": channel}).json()
         self.journal.bind_station(self.users["id"])
         if self.settings.single_user_id != self.users.get("bound_user_id"):
             raise ValueError("Deployment user does not match the administrator's companion binding")

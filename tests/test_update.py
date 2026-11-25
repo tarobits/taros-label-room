@@ -509,6 +509,11 @@ def deployment(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("placeholder")
     (root / "scripts/update.py").write_text(Path(update.__file__).read_text())
+    policy = root / update.RELEASE_POLICY_FILE
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_bytes(
+        (Path(update.__file__).resolve().parents[1] / update.RELEASE_POLICY_FILE).read_bytes()
+    )
     (root / "lang").mkdir()
     (root / update.DEPLOYMENT_LANGUAGE_BUNDLE).write_bytes(
         (
@@ -588,7 +593,18 @@ def test_updates_exact_tag_preserves_main_and_backups_and_rolls_back_on_failure(
         shutil.copytree(root, install, ignore=shutil.ignore_patterns(".git", "data"))
         shutil.move(str(data), str(install / "storage"))
         data = install / "storage"
-    args = update.options(["--mode", mode, "--checkout", str(root), "--install-dir", str(install)])
+    args = update.options(
+        [
+            "--mode",
+            mode,
+            "--checkout",
+            str(root),
+            "--install-dir",
+            str(install),
+            "--channel",
+            channel,
+        ]
+    )
     args.channel = channel
     args.tag = explicit_tag
     args.prebuilt_frontend = prebuilt
@@ -1062,7 +1078,9 @@ def test_release_lookup_authorizes_private_repository_without_token_in_url(monke
     def lookup(request, timeout):
         assert request.get_header("Authorization") == "Bearer github_pat_apiTest"
         assert "github_pat" not in request.full_url
-        return io.BytesIO(b'{"tag_name":"v0.1.0"}')
+        return io.BytesIO(
+            b'[{"tag_name":"v0.1.0","draft":false,"prerelease":false,"published_at":"2026-01-01"}]'
+        )
 
     monkeypatch.setattr(update.urllib.request, "urlopen", lookup)
     assert update.latest_release("tarobits/taros-label-room", "github_pat_apiTest") == "v0.1.0"
@@ -1104,7 +1122,7 @@ def test_latest_release_rejects_invalid_or_unpublished_metadata(monkeypatch, val
     monkeypatch.setattr(
         update.urllib.request, "urlopen", lambda *a, **kw: io.BytesIO(json.dumps(value).encode())
     )
-    with pytest.raises(update.UpdateError, match="published stable"):
+    with pytest.raises(update.UpdateError, match="published semantic"):
         update.latest_release("tarobits/taros-label-room")
 
 
@@ -1283,13 +1301,30 @@ def test_unknown_channel_is_rejected():
         update.options(["--mode", "native", "--channel", "nightly"])
 
 
-def test_beta_selects_latest_publication_across_pages_and_excludes_drafts(monkeypatch):
+def test_beta_selects_highest_semver_across_pages_and_excludes_drafts(monkeypatch):
     pages = [
         [{"tag_name": "v3-draft", "draft": True}] * 99
-        + [{"tag_name": "v1.0.0", "published_at": "2026-10-01T00:00:00Z", "prerelease": False}],
+        + [
+            {
+                "tag_name": "v1.0.0",
+                "draft": False,
+                "published_at": "2026-10-01T00:00:00Z",
+                "prerelease": False,
+            }
+        ],
         [
-            {"tag_name": "v2.0.0-rc.1", "published_at": "2026-11-01T00:00:00Z", "prerelease": True},
-            {"tag_name": "v1.1.0", "published_at": "2026-10-15T00:00:00Z", "prerelease": False},
+            {
+                "tag_name": "v2.0.0-rc.1",
+                "draft": False,
+                "published_at": "2026-11-01T00:00:00Z",
+                "prerelease": True,
+            },
+            {
+                "tag_name": "v1.1.0",
+                "draft": False,
+                "published_at": "2026-10-15T00:00:00Z",
+                "prerelease": False,
+            },
         ],
     ]
     calls = []
@@ -1307,8 +1342,18 @@ def test_beta_selects_latest_publication_across_pages_and_excludes_drafts(monkey
 
 def test_beta_can_select_a_newer_stable_release(monkeypatch):
     releases = [
-        {"tag_name": "v2.0.0-rc.1", "published_at": "2026-10-01T00:00:00Z", "prerelease": True},
-        {"tag_name": "v2.0.0", "published_at": "2026-11-01T00:00:00Z", "prerelease": False},
+        {
+            "tag_name": "v2.0.0-rc.1",
+            "draft": False,
+            "published_at": "2026-10-01T00:00:00Z",
+            "prerelease": True,
+        },
+        {
+            "tag_name": "v2.0.0",
+            "draft": False,
+            "published_at": "2026-11-01T00:00:00Z",
+            "prerelease": False,
+        },
     ]
     monkeypatch.setattr(update, "release_request", lambda *args: releases)
     assert update.beta_release("tarobits/taros-label-room") == "v2.0.0"
@@ -1322,7 +1367,7 @@ def test_beta_can_select_a_newer_stable_release(monkeypatch):
         {},
         [{"tag_name": "v1"}],
         [{"tag_name": "v1", "published_at": "invalid"}],
-        [{"tag_name": "v1", "published_at": "2026-11-01"}],
+        [{"tag_name": "v1", "draft": False, "published_at": "2026-11-01"}],
     ],
 )
 def test_beta_rejects_missing_or_invalid_published_releases(monkeypatch, response):
@@ -1332,10 +1377,10 @@ def test_beta_rejects_missing_or_invalid_published_releases(monkeypatch, respons
 
 
 def test_explicit_tag_uses_encoded_release_endpoint_and_accepts_prereleases(monkeypatch):
-    tag = "preview/v2.0.0-rc.1+build.2"
+    tag = "v2.0.0-rc.1+build.2"
 
     def lookup(request, timeout):
-        assert request.full_url.endswith("/releases/tags/preview%2Fv2.0.0-rc.1%2Bbuild.2")
+        assert request.full_url.endswith("/releases/tags/v2.0.0-rc.1%2Bbuild.2")
         assert request.get_header("Authorization") == "Bearer github_pat_apiTest"
         return io.BytesIO(
             json.dumps({"tag_name": tag, "prerelease": True, "draft": False}).encode()
@@ -1382,6 +1427,7 @@ def test_check_resolves_channel_or_tag_without_changing_checkout(
     release = {
         "tag_name": "v2.0.0-rc.1",
         "prerelease": True,
+        "draft": False,
         "published_at": "2026-11-01T00:00:00Z",
     }
 

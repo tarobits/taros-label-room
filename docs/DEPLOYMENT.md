@@ -57,7 +57,8 @@ For the companion interface, set `LABEL_COMPANION_DEFAULT_LANGUAGE=en` or `de`
 in `.env.companion`. A local language choice overrides this default while signed
 out; after authentication, the user's account language takes precedence.
 
-The default version is GitHub's latest published stable release. No release or
+The default version is the highest published stable semantic version.
+`--channel beta` includes prereleases and remembers the channel. No release or
 missing repository access stops installation. To install a particular release
 or the current branch, pass `--ref RELEASE_TAG` or `--ref main`. The install fetches
 that ref from GitHub; local uncommitted changes are not copied. Use
@@ -355,15 +356,29 @@ backups remain separate from those deleted downloads.
 
 `scripts/update.py` supports both the native systemd service and the `labels`
 Docker Compose service. Run it with Python 3.12+ on the deployment host. It uses
-GitHub's [latest release endpoint](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
-by default (`--channel stable`), which selects a published full release.
-`--channel beta` selects the most recently published release, including
-prereleases and stable releases, by publication time across all release pages.
+GitHub's [published releases](https://docs.github.com/en/rest/releases/releases#list-releases)
+and selects the highest eligible semantic version across all release pages.
+`--channel stable` excludes prerelease tags and releases flagged as prereleases.
+`--channel beta` includes prereleases and stable releases. Publication dates do
+not affect precedence: `preview.10` follows `preview.2`, and a final release
+follows prereleases with the same major/minor/patch version.
 `--tag RELEASE_TAG` selects that exact published release, including prereleases,
 and overrides `--channel`. Neither option falls back to branches, draft releases,
 or Git tags without a published GitHub release. A missing/inaccessible release
-aborts before the application is stopped. Channel selection applies to this
-invocation only; the in-app release notice continues to check stable releases.
+aborts before the application is stopped. Non-SemVer tags are excluded.
+The chosen channel is remembered after success, including when already current.
+Returning to stable while ahead of it saves the channel and waits for stable to
+catch up; it never downgrades the installation. Explicit older tags are rejected.
+An installed version is retained when the selected channel has no eligible release.
+`--check` previews this without saving the channel.
+
+The updater records `.label-release-channel.json` in the installation and runtime
+data directory; these are updater-owned files, not deployment source. Existing
+installations without this metadata default to stable. Main-server notifications
+follow its saved channel. Each companion follows its own saved channel and asks
+the main server to perform the corresponding release check, keeping GitHub
+credentials on the main server. Invalid notice metadata suppresses notifications
+without interrupting printing; invalid updater metadata requires repair.
 
 ### Private GitHub repository access
 
@@ -408,7 +423,7 @@ backup directory private too. Rotate the token in its original file when it
 expires.
 
 The UI footer shows the running version. A dismissible notice in the bottom right
-links to a newer stable release. GitHub checks are shared by all clients and cached
+links to a newer release in the saved channel. GitHub checks are shared by clients and cached
 for an hour; failed checks retry after 15 minutes without interrupting printing.
 Dismissal lasts for the browser tab's session and applies only to that release.
 Set `LABEL_CHECK_FOR_UPDATES=false` in `.env` to disable automatic checks (the
@@ -431,7 +446,8 @@ cannot identify a deployment; it does not silently default to another mode.
 
 Before fetching source, creating backups or stopping the application, the updater
 displays the selected release, detected/overridden mode, role, paths and plan, then
-continues without prompts. With no options it uses the latest stable release and
+continues without prompts. With no options it uses the saved channel (stable for
+installations without saved channel metadata) and
 downloads the prebuilt frontend for native installations. `--yes` (or `-y`) is
 still accepted for compatibility but is no longer required.
 `--check` performs read-only discovery and release lookup without prompting.
@@ -447,8 +463,9 @@ The checkout must have a GitHub `origin` and no tracked or untracked local chang
 Use `.env` for deployment settings. The updater fetches the release's exact tag
 and switches a local `release` branch to that commit, leaving `main` intact. If
 the existing `release` branch is not an ancestor of the selected release, it
-refuses to discard those commits. This also prevents downgrading to an older tag
-or returning from a beta to a stable release that does not include it.
+refuses to discard those commits. Semantic downgrade checks also apply before
+fetching. Returning from beta to an older stable version only saves the stable
+channel; a later newer release must still satisfy the ancestry check.
 Finish current printing and review before scheduling an upgrade.
 
 Preview the selected release and plan without cloning, fetching, changing files,
@@ -467,7 +484,7 @@ To preview the beta channel or a particular release (example tag):
 ```
 
 Remove `--check` to perform the selected update; native updates require `sudo`.
-Both options also work with `--mode docker`. Omitting `--channel` selects stable.
+Both options also work with `--mode docker`. Omitting `--channel` reuses the saved channel.
 
 For a native Git installation at `/opt/labels`, run:
 
@@ -575,7 +592,17 @@ archives and their temporary extraction during recovery. A native `.venv` must b
 a local directory, not a symlink to a shared environment.
 Backups contain credentials and should retain restricted permissions. Docker
 data backups use the old image with networking disabled and a read-only data mount.
-No backup or old Docker image is automatically pruned.
+After a successful update, the updater keeps the newest five completed backups for that
+installation and removes older ones, including backups made by earlier releases.
+Set `LABEL_UPDATE_BACKUP_KEEP=5` in `.env` (main server) or `.env.companion`
+(companion) to change the limit; the value must be an integer of at least 1.
+An environment variable passed to the updater overrides the file setting.
+Cleanup runs after health validation and activation, under the update lock, and
+always retains the current backup. Failed, incomplete, and unknown recovery records
+remain protected regardless of age. Failed updates do not prune backups. Unrecognized
+directories and backups belonging to other installations are left alone. Cleanup
+errors are reported without undoing a successful update and retried after the next
+successful update. Old Docker images are not automatically pruned.
 
 Backup compression can take several minutes on a Raspberry Pi. The updater shows
 each backup stage immediately and reports elapsed time and archive size every
@@ -603,7 +630,9 @@ health-checked; a previously stopped service stays stopped after rollback.
 The updater still exits unsuccessfully when an update fails, even if rollback
 succeeds. It reports the result and backup location; `update.json` records
 `rolled_back` or `rollback_failed`. Inspect the original failure before retrying.
-Backups and old images are retained after both success and failure.
+All backups are retained after failure; the configured retention limit applies
+only to completed updates after the next successful update. Failed recovery
+records remain protected. Old images are retained in either case.
 
 If recovery fails, the updater stops the service and retains the backup for manual
 recovery. If activation was attempted but its outcome is uncertain, it also leaves

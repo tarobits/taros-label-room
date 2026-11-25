@@ -118,12 +118,23 @@ def test_private_release_request_uses_server_token(monkeypatch, tmp_path, use_fi
 
     def open_request(request, timeout):
         assert request.full_url == (
-            "https://api.github.com/repos/tarobits/taros-label-room/releases/latest"
+            "https://api.github.com/repos/tarobits/taros-label-room/releases?per_page=100&page=1"
         )
         assert request.get_header("Authorization") == f"Bearer {token}"
         assert timeout == 5
         assert "github_pat" not in request.full_url
-        return io.BytesIO(json.dumps({"tag_name": "v0.1.1"}).encode())
+        return io.BytesIO(
+            json.dumps(
+                [
+                    {
+                        "tag_name": "v0.1.1",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-01-01",
+                    }
+                ]
+            ).encode()
+        )
 
     monkeypatch.setattr("app.maintenance.releases.urlopen", open_request)
     assert fetch_release(Settings.model_validate(config)) == "v0.1.1"
