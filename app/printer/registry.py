@@ -37,6 +37,12 @@ class NetworkConnection(BaseModel):
     credential_reference: str | None = None
 
 
+class BluetoothConnection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["bluetooth"] = "bluetooth"
+    address: str
+
+
 @dataclass(frozen=True)
 class PrinterCapabilities:
     media_kind: MediaKind
@@ -60,12 +66,12 @@ class PrinterDefinition:
     id: str
     name: str
     driver: str
-    connection: UsbConnection | NetworkConnection | None
+    connection: UsbConnection | NetworkConnection | BluetoothConnection | None
     capabilities: PrinterCapabilities
 
 
 class ByteTransport(Protocol):
-    """Implemented by USB or future network transports; no queue/domain state."""
+    """Implemented by USB and Bluetooth transports; no queue/domain state."""
 
     def open(self) -> None: ...
     def write(self, data: bytes) -> None: ...

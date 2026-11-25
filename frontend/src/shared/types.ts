@@ -1,6 +1,8 @@
 import type { TemplateDocument } from '../templates/editor'
 export type CopyState = 'queued' | 'printing' | 'printed' | 'needs_review' | 'cancelled' | 'failed'
 export interface PrinterConfig {
+  transport?: 'usb' | 'bluetooth'
+  bluetooth_address?: string | null
   usb_serial?: string | null
   resolution?: string
   feed_mm?: number

@@ -1,6 +1,6 @@
 # Companion stations
 
-A companion runs the USB printer adapters and a small web interface. The main
+A companion runs the USB/Bluetooth printer adapters and a small web interface. The main
 server renders labels and owns permissions, queues, cartridge inventory, and
 accounting. The companion connects outward over HTTPS; the main server never
 needs an inbound connection to the station.
@@ -472,10 +472,29 @@ Run one companion process per data directory. Main and companion servers belong
 on different machines. Never delete the companion journal to recover printing: it prevents duplicate attempts. Stop or
 finish printing before upgrades; a forced process termination is treated as
 uncertain output on restart. Keep the main server and companion on compatible
-versions; the initial batch protocol is version 1.
+versions; USB batches use protocol version 1, while Bluetooth batches require
+version 2. Older companions reject version 2 before execution.
 
 Automated tests use simulated adapters. Physical USB printing, Pi packaging, and
 real network interruption still require hardware acceptance on the deployment.
+
+## Local Bluetooth pairing
+
+Native Linux companions support PT-P710BT Bluetooth printing through BlueZ.
+Both main server and companion must include Bluetooth support before using it;
+older companions cannot execute Bluetooth batches.
+Prepare the host as described under [Bluetooth deployment](DEPLOYMENT.md#bluetooth-printers-on-native-linux).
+Unlock the station with an account that has printer-management permission,
+then use **Add printer** or the printer's configuration dialog. Select
+**Bluetooth**, find the printer, select it and pair before saving. The companion
+must be online so the main server can verify the operator's current permissions.
+Only the adapter on that companion is used; pairing is not proxied from the
+main admin interface.
+
+Changing an existing registration between USB and Bluetooth keeps queued labels,
+history and cartridge assignment. Finish active printing and resolve uncertain
+results first. The companion applies the saved connection through its normal
+configuration synchronization. Bluetooth hardware acceptance is still pending.
 
 ## Moving an existing main-server printer
 

@@ -1,0 +1,40 @@
+name: Bluetooth and deployment checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulated-bluetooth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install -c requirements.lock '.[dev]'
+      - name: Simulate transport, authorization and connection changes
+        run: .venv/bin/python -m pytest tests/test_bluetooth.py tests/test_brother.py tests/test_web_printers.py tests/test_companion_station.py tests/test_printer_lifecycle.py -q --show-capture=no --tb=short
+      - name: Verify deployment selection, recovery and retention
+        run: .venv/bin/python -m pytest tests/test_update.py tests/test_update_retention.py tests/test_install.py tests/test_release_channels.py tests/test_releases.py tests/test_companion_deployment.py -q --show-capture=no --tb=short
+      - run: npm ci --prefix frontend
+      - run: npm run build:all --prefix frontend
+      - run: npm run test:i18n --prefix frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Verify main and companion pairing forms
+        run: npx playwright test tests/bluetooth.spec.ts --reporter=line
+        working-directory: frontend

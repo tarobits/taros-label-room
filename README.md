@@ -1,7 +1,9 @@
 # Taro's Label Room
 
 A self-hosted app for designing, sharing and printing labels with Brother
-PT-P710BT USB printers.
+PT-P710BT printers over USB, with Bluetooth pairing and printing on native Linux.
+See [Bluetooth setup](docs/DEPLOYMENT.md#bluetooth-printers-on-native-linux) for host
+requirements and the pending physical hardware verification.
 
 - Reusable templates with text, images, QR codes, barcodes and optional layout rules.
 - Individual labels or spreadsheet imports, with previews before printing.

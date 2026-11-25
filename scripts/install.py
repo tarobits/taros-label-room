@@ -350,6 +350,7 @@ def system_dependencies(args: argparse.Namespace) -> None:
                 "npm",
                 "libusb-1.0-0",
                 "usbutils",
+                "bluez",
                 "udev",
             ],
             env=env,

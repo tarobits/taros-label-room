@@ -50,7 +50,9 @@ class WireLabel(Input):
 
 
 class BatchEnvelope(Input):
-    version: Literal[1] = 1
+    # Version 2 requires understanding explicit non-USB transport configuration.
+    # Version-1 executors reject it before authorizing or printing any bytes.
+    version: Literal[1, 2] = 1
     batch_id: str = Field(min_length=1, max_length=100)
     printer_id: str = Field(min_length=1, max_length=100)
     local_id: str = Field(min_length=1, max_length=100)
@@ -60,6 +62,8 @@ class BatchEnvelope(Input):
 
     @model_validator(mode="after")
     def bounded_batch(self) -> "BatchEnvelope":
+        if self.version == 1 and self.configuration.get("transport", "usb") != "usb":
+            raise ValueError("Non-USB transport requires batch protocol version 2")
         if sum(len(label.raster) for label in self.labels) > 32_000_000:
             raise ValueError("Rendered batch exceeds transfer limit")
         if len({label.copy_id for label in self.labels}) != len(self.labels):

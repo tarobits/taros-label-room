@@ -8,6 +8,7 @@ import { api } from '../shared/api'
 import { requestPrinting } from '../printing/printing'
 import { useWorkspaceStore, metres } from '../shared/workspace'
 import PropertySection from '../components/PropertySection.vue'
+import PrinterConnection from '../components/PrinterConnection.vue'
 import AdminDialog from '../components/AdminDialog.vue'
 import ExpandableContent from '../components/ExpandableContent.vue'
 import CartridgeDetection from '../components/CartridgeDetection.vue'
@@ -20,6 +21,7 @@ const showPrinter = ref(false),
   showGroup = ref(false),
   editing = ref('')
 const editingPrinter = ref('')
+const connectionBusy = ref(false)
 const detailsPrinter = ref('')
 const cartridgeChecks = reactive<Record<string, boolean>>({})
 const movingPrinter = ref('')
@@ -69,6 +71,8 @@ const defaults = () => ({
   no_automatic_printing: false,
   driver: 'brother-pt-p710bt',
   usb_serial: '',
+  transport: 'usb' as 'usb' | 'bluetooth',
+  bluetooth_address: null as string | null,
   resolution: 'high',
   feed_mm: 2,
   leader_mm: 24.5,
@@ -118,6 +122,7 @@ function availableCartridges(id: string) {
   )
 }
 async function addPrinter() {
+  if (connectionBusy.value) return
   if (
     await w.action(
       () =>
@@ -237,12 +242,9 @@ function move(index: number, offset: number) {
         <label
           >{{ $t('printers.driver')
           }}<select v-model="printer.driver">
-            <option value="brother-pt-p710bt">{{ $t('printers.brotherPtP710btUsb') }}</option>
+            <option value="brother-pt-p710bt">Brother PT-P710BT</option>
           </select></label
         >
-        <label
-          >{{ $t('common.usbSerialNumber') }}<input v-model="printer.usb_serial" maxlength="128"
-        /></label>
         <label
           >{{ $t('printers.defaultPrintResolution')
           }}<select v-model="printer.resolution">
@@ -251,6 +253,16 @@ function move(index: number, offset: number) {
           </select></label
         >
       </div>
+      <PrinterConnection
+        v-model:transport="printer.transport"
+        v-model:serial="printer.usb_serial"
+        v-model:address="printer.bluetooth_address"
+        endpoint="/printer-bluetooth"
+        :can-pair="
+          auth.can('printers.manage') && !w.printers.find((p) => p.id === editingPrinter)?.companion
+        "
+        @busy="connectionBusy = $event"
+      />
       <PropertySection :title="$t('printers.feedCutSettings')">
         <div class="field-row">
           <label
@@ -295,11 +307,13 @@ function move(index: number, offset: number) {
           $t('common.noAutomaticPrinting')
         }}</label
       >
-      <p class="help">
-        {{ $t('common.usbSerialIsOptionalForOnePrinterMultiplePrinters') }}
-      </p>
+      <ExpandableContent :open="printer.transport !== 'bluetooth'">
+        <p class="help">
+          {{ $t('common.usbSerialIsOptionalForOnePrinterMultiplePrinters') }}
+        </p>
+      </ExpandableContent>
       <div class="row">
-        <button class="primary" :disabled="w.busy">
+        <button class="primary" :disabled="w.busy || connectionBusy">
           {{
             editingPrinter ? $t('uiMessages.savePrinter') : $t('uiMessages.registerPrinter')
           }}</button
@@ -348,7 +362,9 @@ function move(index: number, offset: number) {
         {{ state(device.id)?.printer_error }}
       </p>
       <CartridgeDetection :status="state(device.id)" />
-      <p class="muted">{{ $t('printers.brotherPtP710btUsb2') }}</p>
+      <p class="muted">
+        Brother PT-P710BT · {{ device.config.transport === 'bluetooth' ? 'Bluetooth' : 'USB' }}
+      </p>
       <p class="help">
         {{ device.capabilities?.dpi_y }} × {{ device.capabilities?.dpi_x }}
         {{ $t('common.dpiDetectedTape') }}

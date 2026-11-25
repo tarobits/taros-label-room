@@ -72,7 +72,14 @@ def validate_device(body: PrinterInput, session: Session, identifier: str | None
         if hosts.get(device.id) == host
         and device.id not in inactive
         and not device.config.get("retired")
+        and device.config.get("transport", "usb") == body.transport
     ]
+    if body.transport == "bluetooth":
+        if any(
+            d.config.get("bluetooth_address", "").upper() == body.bluetooth_address for d in others
+        ):
+            raise HTTPException(409, Message("printerMessages.bluetoothAlreadyRegistered"))
+        return
     if others and (not body.usb_serial or any(not d.config.get("usb_serial") for d in others)):
         raise HTTPException(
             422,
@@ -141,8 +148,20 @@ def edit_printer(
         raise HTTPException(422, error_detail(error)) from error
     validate_device(body, session, identifier)
     config = body.model_dump(exclude={"name", "driver", "no_automatic_printing"})
-    changed = device.driver != body.driver or device.config != config
-    if changed and identifier in request.app.state.fleet.workers:
+    from app.printer.factory import configuration_matches, connection_only_change
+
+    changed = device.driver != body.driver or not configuration_matches(
+        body.driver, device.config, config
+    )
+
+    connection_change = device.driver == body.driver and connection_only_change(
+        body.driver, device.config, config
+    )
+    if changed and connection_change:
+        from app.printing.printer_lifecycle import idle_locked
+
+        idle_locked(request, session, identifier)
+    if changed and not connection_change and identifier in request.app.state.fleet.workers:
         affected = [identifier] + [
             g.id for g in session.scalars(select(PrinterGroup)) if identifier in g.printer_ids
         ]
@@ -201,7 +220,7 @@ def edit_printer(
                         )
     reconfigure = changed or device.name != body.name
     worker = request.app.state.fleet.workers.get(identifier)
-    if worker and reconfigure:
+    if worker and reconfigure and not connection_change:
         if not worker.printer_lock.acquire(blocking=False):
             raise HTTPException(409, Message("serverMessages.printerIsBusyTryAgainWhenItIsIdle"))
         request.state.held_locks.append(worker.printer_lock)

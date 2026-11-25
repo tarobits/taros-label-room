@@ -21,6 +21,7 @@ import SourceLink from './components/SourceLink.vue'
 import PaymentAttribution from './components/PaymentAttribution.vue'
 import StationTelemetry, { type StationDashboard } from './components/StationTelemetry.vue'
 import CompanionPacking from './components/CompanionPacking.vue'
+import PrinterConnection from './components/PrinterConnection.vue'
 import MotionSurface from './components/MotionSurface.vue'
 import AnimatedDetails from './components/AnimatedDetails.vue'
 import {
@@ -152,6 +153,7 @@ const cartridgeId = ref(''),
 const jobs = computed(() => queueGroups.value.flatMap((group) => group.jobs))
 const packingPrinter = ref<LocalPrinter | null>(null)
 const packingView = ref<InstanceType<typeof CompanionPacking>>()
+const connectionBusy = ref(false)
 const queuePage = ref(0),
   hasNextPage = ref(false)
 const config = ref<
@@ -974,6 +976,8 @@ function addPrinter() {
     name: '',
     driver: 'brother-pt-p710bt',
     usb_serial: null,
+    transport: 'usb',
+    bluetooth_address: null,
     resolution: 'high',
     feed_mm: 2,
     leader_mm: 24.5,
@@ -1000,6 +1004,7 @@ async function setPrinterEnabled(printer: { local_id: string; name: string }, en
   )
 }
 async function saveConfig() {
+  if (connectionBusy.value) return
   await perform(async () => {
     if (newPrinterId.value && config.value) {
       const { name, driver, ...configuration } = config.value
@@ -1722,10 +1727,16 @@ function changePage(delta: number) {
     @close="config = undefined"
     ><form v-if="config" v-validate-form class="form-stack" @submit.prevent="saveConfig">
       <p v-if="error" class="alert danger" role="alert">{{ error }}</p>
-      <label>{{ $t('common.name') }}<input v-model="config.name" required maxlength="100" /></label
-      ><label
-        >{{ $t('common.usbSerial') }}<input v-model="config.usb_serial" maxlength="128" /></label
-      ><label
+      <label>{{ $t('common.name') }}<input v-model="config.name" required maxlength="100" /></label>
+      <PrinterConnection
+        v-model:transport="config.transport"
+        v-model:serial="config.usb_serial"
+        v-model:address="config.bluetooth_address"
+        endpoint="/station/bluetooth"
+        :can-pair="!!station?.user?.permissions.includes('printers.manage')"
+        @busy="connectionBusy = $event"
+      />
+      <label
         >{{ $t('companionApp.resolution')
         }}<select v-model="config.resolution">
           <option value="normal">{{ $t('companionApp.normal') }}</option>
@@ -1756,7 +1767,7 @@ function changePage(delta: number) {
           $t('common.noAutomaticPrinting')
         }}</label
       >
-      <button class="primary" :disabled="busy || !operational">
+      <button class="primary" :disabled="busy || connectionBusy || !operational">
         {{ newPrinterId ? $t('common.addPrinter') : $t('uiMessages.saveConfiguration') }}
       </button>
     </form></AdminDialog

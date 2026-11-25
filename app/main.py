@@ -293,6 +293,23 @@ def create_app(
     app.include_router(notification_endpoints_router)
     app.include_router(router, dependencies=[Depends(authorize_request)])
     app.include_router(fleet_router, dependencies=[Depends(authorize_request)])
+    from app.printer.bluetooth import BluetoothService
+    from app.printer.bluetooth_api import bluetooth_router
+
+    app.state.bluetooth = BluetoothService()
+
+    def authorize_bluetooth(request: Request) -> None:
+        from app.authn.access import access_context
+
+        if not access_context(request).has_permission("printers.manage"):
+            raise HTTPException(
+                403, Message("serverMessages.printerManagementPermissionIsRequired")
+            )
+
+    app.include_router(
+        bluetooth_router("/api/printer-bluetooth", authorize_bluetooth),
+        dependencies=[Depends(authorize_request)],
+    )
     app.include_router(printer_lifecycle_router, dependencies=[Depends(authorize_request)])
     app.include_router(queue_routing_router, dependencies=[Depends(authorize_request)])
     app.include_router(runs_router, dependencies=[Depends(authorize_request)])

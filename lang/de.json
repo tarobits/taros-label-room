@@ -1,4 +1,15 @@
 {
+  "bluetooth": {
+    "connection": "Verbindung",
+    "printer": "Bluetooth-Drucker",
+    "choosePrinter": "Drucker auswählen",
+    "paired": "Gekoppelt",
+    "address": "Bluetooth-Adresse",
+    "scan": "Drucker suchen",
+    "pair": "Koppeln",
+    "working": "Verbindung wird hergestellt…",
+    "pairFirst": "Den ausgewählten Drucker vor dem Speichern koppeln."
+  },
   "serverDetails": {
     "recordNotFound": "{resource} nicht gefunden",
     "groupImages": "Du darfst in dieser Gruppe keine Bilder hochladen",
@@ -3420,6 +3431,17 @@
     "emptyCsv": "Die CSV-Datei ist leer"
   },
   "printerMessages": {
+    "bluetoothAddressInvalid": "Eine gültige Bluetooth-Adresse eingeben.",
+    "bluetoothAddressRequired": "Einen Bluetooth-Drucker auswählen.",
+    "bluetoothUnavailable": "Bluetooth ist nicht verfügbar. Bluetooth-Dienst und Zugriffsrechte auf diesem Gerät prüfen.",
+    "bluetoothNativeLinuxOnly": "Bluetooth-Druck erfordert eine native Linux-Installation.",
+    "bluetoothBusy": "Die Bluetooth-Einrichtung ist beschäftigt. Bitte gleich erneut versuchen.",
+    "bluetoothAdapterOff": "Kein eingeschalteter Bluetooth-Adapter verfügbar.",
+    "bluetoothNotFound": "Dieser PT-P710BT wurde nicht gefunden. Einschalten und erneut suchen.",
+    "bluetoothNotPaired": "Dieser Bluetooth-Drucker ist auf diesem Gerät nicht gekoppelt.",
+    "bluetoothProfileMissing": "Der gekoppelte Drucker bietet kein serielles Bluetooth-Profil an.",
+    "bluetoothDisconnected": "Die Verbindung zum Bluetooth-Drucker wurde getrennt.",
+    "bluetoothAlreadyRegistered": "Dieser Bluetooth-Drucker ist bereits registriert.",
     "disconnected": "Drucker getrennt",
     "investigation": "Companion-Drucker muss überprüft werden",
     "investigationReason": "Companion-Drucker muss überprüft werden: {reason}",

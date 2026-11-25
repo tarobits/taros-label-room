@@ -83,6 +83,7 @@ class RemotePrinterBackend:
             if not link or not device:
                 raise PrintNotStarted("Companion printer is no longer registered")
             payload = BatchEnvelope(
+                version=2 if device.config.get("transport", "usb") != "usb" else 1,
                 batch_id=batch_id,
                 printer_id=device.id,
                 local_id=link.local_id,

@@ -251,6 +251,31 @@ def create_app(
     def health() -> dict[str, bool]:
         return {"healthy": True}
 
+    from app.printer.bluetooth import BluetoothService
+    from app.printer.bluetooth_api import bluetooth_router
+
+    app.state.bluetooth = BluetoothService()
+
+    def authorize_bluetooth(request: Request) -> None:
+        if request.method != "GET":
+            csrf(request)
+        token = current(request, touch=request.method != "GET")
+        if not agent.online:
+            raise HTTPException(503, Message("serverMessages.theMainServerIsUnavailable"))
+        # Check current server-side permissions, not a cached station dashboard.
+        user = agent.request("GET", "/api/companion/operator", token=token).json()
+        if "printers.manage" not in user.get("permissions", []):
+            raise HTTPException(
+                403, Message("serverMessages.printerManagementPermissionIsRequired")
+            )
+        with station.lock:
+            if token != station.remote_token:
+                raise HTTPException(
+                    409, Message("serverMessages.stationChangedRefreshTheDashboard")
+                )
+
+    app.include_router(bluetooth_router("/api/station/bluetooth", authorize_bluetooth))
+
     @app.get("/api/station")
     def dashboard(request: Request) -> dict[str, Any]:
         token = None

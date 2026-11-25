@@ -1,7 +1,7 @@
 # Printer architecture and scope
 
 Operational multi-printer support includes independent Brother PT-P710BT
-USB printers and explicit printer-group destinations. Other printer models and
+USB printers, native Linux Bluetooth transport and explicit printer-group destinations. Other printer models and
 Wi-Fi/Ethernet drivers are not implemented. Accounts,
 directly assigned roles, scoped moderation and revocation holds are integrated at
 application boundaries; see [the access-control specification](ACCESS_CONTROL.md).
@@ -37,7 +37,12 @@ protocols for future drivers. Network transport, discovery, and Wi-Fi provisioni
 Register and edit all printers under **Printers & groups**. A lone USB printer
 can use automatic discovery; multiple devices require distinct USB serials.
 The form owns name, serial, resolution, feed, leader estimate, cutting and timeout.
-Configuration changes require idle hardware and no affected queued work, pending
+Switching only between USB and Bluetooth keeps the same device identity and
+queued work, while requiring idle hardware and no unresolved print results.
+BlueZ pairing and SPP byte transport live in `app/printer/bluetooth.py`; the
+existing Brother raster adapter handles both connections. Pairing is an explicit
+local administrative operation, never an automatic action during printing.
+Other configuration changes require idle hardware and no affected queued work, pending
 flush or saved draft. Group members must retain matching rendering capabilities.
 Changes commit before the live adapter is replaced, without restarting the server.
 The former `/settings` page redirects here.

@@ -20,6 +20,46 @@ See [MariaDB setup and SQLite migration](MARIADB.md) for connection settings,
 the native installer's `--database-url-file` option, and verified data transfer.
 Companions keep their local SQLite journal.
 
+## Bluetooth printers on native Linux
+
+The PT-P710BT can use USB or Bluetooth on a native Linux host, including
+Raspberry Pi OS. Bluetooth uses the host's BlueZ system service and adapter;
+browser Bluetooth permissions are not needed. Bluetooth in containers, macOS,
+and Windows is not supported by this integration.
+
+The native installer includes `bluez` among its OS prerequisites. For an existing
+installation without BlueZ, an administrator must prepare the host:
+
+```sh
+sudo apt-get install bluez
+sudo systemctl enable --now bluetooth
+bluetoothctl power on
+```
+
+The application continues to run as its existing unprivileged service account.
+It needs access to `org.bluez` on the system D-Bus; upstream BlueZ permits this
+by default. If a distribution restricts it, grant access to that service account
+through the distribution's policy mechanism instead of running the app as root.
+An absent, blocked, or powered-off adapter must be resolved on the host.
+
+In **Printers & groups**, add or configure a PT-P710BT, select **Bluetooth**,
+choose **Find printers**, select the printer and choose **Pair**. Turn the printer
+on first and disconnect any phone or other computer using it. Pairing requires
+printer-management permission. BlueZ retains the bond in its own system state,
+outside application backups; moving the installation to a new host requires
+pairing there again. There is no automatic USB fallback or replay after a failed
+Bluetooth transmission.
+
+To switch an existing printer, change its **Connection** and save. Switching
+between USB and Bluetooth preserves its identity, queue, history, groups, and
+cartridge assignment. Active printing or unresolved investigation blocks the
+switch. Changing rendering settings at the same time still requires the normal
+empty-queue checks. Use the companion's own interface to discover and pair
+printers attached to that companion; the main interface never pairs remotely.
+
+Physical Bluetooth printing and service-account access still require acceptance
+on the target Linux machine; see [the verification record](HARDWARE_VERIFICATION.md).
+
 ## GitHub installer
 
 The request quantity-editing and session-management updates add database migrations

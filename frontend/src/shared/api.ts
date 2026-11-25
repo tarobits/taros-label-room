@@ -65,6 +65,7 @@ export async function api<T>(
   method = 'GET',
   body?: unknown,
   headers: Record<string, string> = {},
+  timeoutMs = 15000,
 ): Promise<T> {
   // Never queue or replay mutations during an outage.
   if (serverUnavailable.value) throw new ApiError(serverUnavailableMessage.value, 0)
@@ -94,7 +95,7 @@ export async function api<T>(
       ...headers,
     },
     body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(timeoutMs),
   }
   let response: Response
   try {

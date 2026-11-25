@@ -19,6 +19,21 @@ specification, OS family, print settings, and measured results. Use anonymous de
 labels when comparing units; omit serial numbers, hostnames, local usernames,
 network addresses, and deployment logs containing account information.
 
+## Bluetooth acceptance pending
+
+The native Linux Bluetooth implementation has simulated BlueZ and socket tests,
+including discovery, scoped pairing, permission rejection, timeout cleanup,
+disconnects without replay, and USB/Bluetooth switching with queued labels.
+These do not establish successful physical Bluetooth printing.
+
+On a Linux/Raspberry Pi host, verify pairing from both main and companion
+interfaces under the installed service account, status/media detection, a
+single label and a multi-label batch, reconnection after printer/host restart,
+and switching both ways with queued work. Interrupt a controlled test print
+and verify uncertain output requires investigation without automatic duplication.
+Record normal/high resolution, tape widths, cutting, stop-after-label and
+emergency-stop behavior separately from USB results.
+
 ## Template logic and mobile checks
 
 Reported checks on 2026-11-06 and 2026-11-07 confirmed conditional subtitle

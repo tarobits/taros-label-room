@@ -159,11 +159,21 @@ class PrinterInput(Input):
     no_automatic_printing: bool = False
     driver: str = Field(default="brother-pt-p710bt", min_length=1, max_length=100)
     usb_serial: str | None = Field(default=None, min_length=1, max_length=128)
+    transport: Literal["usb", "bluetooth"] = "usb"
+    bluetooth_address: str | None = Field(default=None, max_length=17)
     resolution: Literal["normal", "high"] = "normal"
     feed_mm: float = Field(default=2, ge=2, le=127)
     leader_mm: float = Field(default=24.5, ge=0, le=200)
     cut_each: bool = True
     timeout_seconds: float = Field(default=120, ge=5, le=600)
+
+    @model_validator(mode="after")
+    def connection_settings(self):
+        from app.printer.factory import DeviceConfiguration
+
+        settings = DeviceConfiguration.model_validate(self.model_dump())
+        self.bluetooth_address = settings.bluetooth_address
+        return self
 
 
 class CreatePrinterInput(PrinterInput):

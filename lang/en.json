@@ -1,4 +1,15 @@
 {
+  "bluetooth": {
+    "connection": "Connection",
+    "printer": "Bluetooth printer",
+    "choosePrinter": "Choose a printer",
+    "paired": "Paired",
+    "address": "Bluetooth address",
+    "scan": "Find printers",
+    "pair": "Pair",
+    "working": "Connecting…",
+    "pairFirst": "Pair the selected printer before saving."
+  },
   "serverDetails": {
     "recordNotFound": "{resource} not found",
     "groupImages": "You cannot upload images in this group",
@@ -3420,6 +3431,17 @@
     "emptyCsv": "CSV is empty"
   },
   "printerMessages": {
+    "bluetoothAddressInvalid": "Enter a valid Bluetooth address.",
+    "bluetoothAddressRequired": "Choose a Bluetooth printer.",
+    "bluetoothUnavailable": "Bluetooth is unavailable. Check the Bluetooth service and its access permissions on this machine.",
+    "bluetoothNativeLinuxOnly": "Bluetooth printing requires a native Linux installation.",
+    "bluetoothBusy": "Bluetooth setup is busy. Try again shortly.",
+    "bluetoothAdapterOff": "No powered Bluetooth adapter is available.",
+    "bluetoothNotFound": "This PT-P710BT was not found. Turn it on and search again.",
+    "bluetoothNotPaired": "This Bluetooth printer is not paired on this machine.",
+    "bluetoothProfileMissing": "The paired printer does not offer the Bluetooth serial profile.",
+    "bluetoothDisconnected": "The Bluetooth printer disconnected.",
+    "bluetoothAlreadyRegistered": "This Bluetooth printer is already registered.",
     "disconnected": "Printer disconnected",
     "investigation": "Companion printer requires investigation",
     "investigationReason": "Companion printer requires investigation: {reason}",
