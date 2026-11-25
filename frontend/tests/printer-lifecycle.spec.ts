@@ -1,4 +1,23 @@
+import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures'
+
+async function whenIdle(page: Page, path: string, method: string, action: () => Promise<void>) {
+  // Status polling also owns the hardware lock. Retry only that documented
+  // temporary conflict, exercising the same explicit retry available to users.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === method && new URL(response.url()).pathname === path,
+      ),
+      action(),
+    ])
+    if (response.ok()) return
+    expect(response.status()).toBe(409)
+    expect((await response.json()).detail).toBe('Printer is busy; try again when it is idle')
+  }
+  throw new Error('Printer remained busy across five explicit attempts')
+}
 
 for (const width of [1280, 390]) {
   test(`move and retire printer registrations at ${width}px`, async ({ page, request }) => {
@@ -71,7 +90,9 @@ for (const width of [1280, 390]) {
       path: `test-results/printer-move-${width}.png`,
       animations: 'disabled',
     })
-    await dialog.getByRole('button', { name: 'Move printer', exact: true }).click()
+    await whenIdle(page, `/api/printers/${source.id}/move-to-companion`, 'POST', () =>
+      dialog.getByRole('button', { name: 'Move printer', exact: true }).click(),
+    )
     await expect(dialog).not.toBeVisible()
     await expect(page.locator('.printer-device')).toHaveCount(1)
     await expect(
@@ -105,8 +126,10 @@ for (const width of [1280, 390]) {
     await expect(confirm).toContainText('Print history and audit records will be retained')
     await confirm.getByRole('button', { name: 'Cancel', exact: true }).click()
     await expect(confirm).not.toBeVisible()
-    await card.getByRole('button', { name: 'Retire printer', exact: true }).click()
-    await confirm.getByRole('button', { name: 'Retire printer', exact: true }).click()
+    await whenIdle(page, `/api/printers/${source.id}`, 'DELETE', async () => {
+      await card.getByRole('button', { name: 'Retire printer', exact: true }).click()
+      await confirm.getByRole('button', { name: 'Retire printer', exact: true }).click()
+    })
     await expect(page.locator('.printer-device')).toHaveCount(0)
     await expect(page.getByText('No printers registered.', { exact: true })).toBeVisible()
     expect(await (await request.get('/api/printers')).json()).toEqual([])
